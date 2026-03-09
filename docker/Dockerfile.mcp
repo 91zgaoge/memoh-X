@@ -19,8 +19,8 @@ FROM alpine:latest
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-# Base utilities
-RUN apk add --no-cache grep curl bash tzdata gcompat \
+# Base utilities + dumb-init (PID 1 init system to reap zombie processes)
+RUN apk add --no-cache grep curl bash tzdata gcompat dumb-init \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
     && echo "${TZ}" > /etc/timezone
 
@@ -51,4 +51,5 @@ RUN apk add --no-cache --virtual .ov-build-deps \
 WORKDIR /app
 COPY --from=build /out/mcp /opt/mcp
 COPY cmd/mcp/template /opt/mcp-template
-ENTRYPOINT ["/bin/sh","-lc","bootstrap(){ [ -e /app/mcp ] || { mkdir -p /app; [ -f /opt/mcp ] && cp -a /opt/mcp /app/mcp 2>/dev/null || true; }; [ -d /tmp ] || mkdir -p /tmp; chmod 1777 /tmp 2>/dev/null || true; }; bootstrap; if [ -x /app/mcp ]; then exec /app/mcp \"$@\"; fi; exec /opt/mcp \"$@\"","--"]
+# Use dumb-init as PID 1 to properly reap zombie processes from child processes (npx, uvx, etc.)
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/bin/sh","-lc","bootstrap(){ [ -e /app/mcp ] || { mkdir -p /app; [ -f /opt/mcp ] && cp -a /opt/mcp /app/mcp 2>/dev/null || true; }; [ -d /tmp ] || mkdir -p /tmp; chmod 1777 /tmp 2>/dev/null || true; }; bootstrap; if [ -x /app/mcp ]; then exec /app/mcp \"$@\"; fi; exec /opt/mcp \"$@\"","--"]
