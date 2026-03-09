@@ -29,6 +29,7 @@ import (
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/local"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/telegram"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/wechat"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/wecom"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/identities"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/inbound"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/route"
@@ -463,7 +464,7 @@ func provideChatResolver(log *slog.Logger, cfg config.Config, gs *globalsettings
 // channel providers
 // ---------------------------------------------------------------------------
 
-func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub) *channel.Registry {
+func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, msgService *message.DBService) *channel.Registry {
 	registry := channel.NewRegistry()
 	registry.MustRegister(telegram.NewTelegramAdapter(log))
 	registry.MustRegister(feishu.NewFeishuAdapter(log))
@@ -471,6 +472,14 @@ func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub) *channel.Regi
 	registry.MustRegister(local.NewCLIAdapter(hub))
 	registry.MustRegister(local.NewWebAdapter(hub))
 	registry.MustRegister(wechat.NewWeChatAdapter(log))
+
+	// WeCom adapter with message service for "new chat" command
+	wecomAdapter := wecom.NewWeComAdapter(log)
+	if msgService != nil {
+		wecomAdapter.SetMessageService(msgService)
+	}
+	registry.MustRegister(wecomAdapter)
+
 	return registry
 }
 
