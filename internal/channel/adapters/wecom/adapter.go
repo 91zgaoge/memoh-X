@@ -67,6 +67,26 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 	}
 }
 
+// sendThinkingReply sends an immediate "thinking" response to improve user experience
+func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClient, reqID string) {
+	if wsClient == nil || reqID == "" {
+		return
+	}
+
+	thinkingBody := RespondMsgBody{
+		MsgType: MsgTypeText,
+		Text: &TextContent{
+			Content: "思考中...",
+		},
+	}
+
+	if err := wsClient.SendReply(ctx, reqID, thinkingBody, CmdRespondUpdate); err != nil {
+		a.logger.Debug("failed to send thinking reply", slog.Any("error", err))
+	} else {
+		a.logger.Debug("thinking reply sent", slog.String("req_id", reqID))
+	}
+}
+
 // Type returns the channel type
 func (a *Adapter) Type() channel.ChannelType {
 	return Type
@@ -236,6 +256,9 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 		return fmt.Errorf("unmarshal message body: %w", err)
 	}
 
+	// Get WebSocket client for sending replies
+	wsClient := a.getWebSocketClient(cfg.BotID)
+
 	// Get content preview based on message type
 	contentPreview := ""
 	switch body.MsgType {
@@ -341,6 +364,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 
 			// Check if should trigger response
 			if shouldTrigger {
+				// Send immediate "thinking" reply for better UX
+				a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
 				return handler(ctx, cfg, msg)
 			}
 			a.logger.Info("skipping group message (no mention)")
@@ -377,6 +402,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 					},
 				})
 			}
+			// Send immediate "thinking" reply for better UX
+			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
 			return handler(ctx, cfg, msg)
 		}
 
@@ -411,6 +438,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 					},
 				})
 			}
+			// Send immediate "thinking" reply for better UX
+			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
 			return handler(ctx, cfg, msg)
 		}
 
@@ -424,6 +453,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			// Voice content is the transcribed text from WeCom
 			msg.Message.Text = body.Voice.Content
 			msg.Message.Format = channel.MessageFormatPlain
+			// Send immediate "thinking" reply for better UX
+			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
 			return handler(ctx, cfg, msg)
 		}
 
@@ -610,6 +641,10 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 			"is_mentioned": body.ChatType == "group",
 		},
 	}
+
+	// Send immediate "thinking" reply for better UX
+	wsClient := a.getWebSocketClient(cfg.BotID)
+	a.sendThinkingReply(ctx, wsClient, reqID)
 
 	return handler(ctx, cfg, msg)
 }
