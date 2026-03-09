@@ -27,8 +27,8 @@ FROM alpine:latest AS mcp-rootfs
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-# Base utilities
-RUN apk add --no-cache grep curl bash tzdata gcompat \
+# Base utilities + dumb-init (PID 1 init system to reap zombie processes)
+RUN apk add --no-cache grep curl bash tzdata gcompat dumb-init \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
     && echo "${TZ}" > /etc/timezone
 
@@ -59,12 +59,16 @@ RUN apk add --no-cache --virtual .ov-build-deps \
 COPY --from=mcp-builder /out/mcp /opt/mcp
 COPY cmd/mcp/template /opt/mcp-template
 
+# Use dumb-init wrapper script for proper zombie process reaping
 RUN printf '#!/bin/sh\n\
 [ -e /app/mcp ] || { mkdir -p /app; [ -f /opt/mcp ] && cp -a /opt/mcp /app/mcp 2>/dev/null || true; }\n\
 [ -d /tmp ] || mkdir -p /tmp\n\
 chmod 1777 /tmp 2>/dev/null || true\n\
 if [ -x /app/mcp ]; then exec /app/mcp "$@"; fi\n\
-exec /opt/mcp "$@"\n' > /opt/entrypoint.sh && chmod +x /opt/entrypoint.sh
+exec /opt/mcp "$@"\n' > /opt/entrypoint-inner.sh && chmod +x /opt/entrypoint-inner.sh && \
+\
+printf '#!/bin/sh\n\
+exec /usr/bin/dumb-init -- /opt/entrypoint-inner.sh "$@"\n' > /opt/entrypoint.sh && chmod +x /opt/entrypoint.sh
 
 # Create rootfs tar excluding pseudo-filesystems
 RUN tar -cf /tmp/rootfs.tar \
