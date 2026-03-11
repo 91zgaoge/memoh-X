@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	identitypkg "github.com/memohai/memoh/internal/channel/identities"
-	routepkg "github.com/memohai/memoh/internal/channel/route"
+	identitypkg "github.com/Kxiandaoyan/Memoh-v2/internal/channel/identities"
+	routepkg "github.com/Kxiandaoyan/Memoh-v2/internal/channel/route"
 )
 
 const testQQOpenID = "00112233445566778899AABBCCDDEEFF"

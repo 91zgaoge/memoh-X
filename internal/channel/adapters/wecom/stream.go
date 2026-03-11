@@ -21,6 +21,8 @@ type OutboundStream struct {
 	reqID           string
 	chatID          string
 	userID          string
+	chatType        string // 会话类型：single 或 group
+	isMentioned     bool   // 是否被@提及（群聊时有效）
 	logger          *slog.Logger
 
 	buffer          strings.Builder
@@ -38,7 +40,7 @@ type OutboundStream struct {
 const StreamTimeout = 6 * time.Minute
 
 // NewOutboundStream creates a new outbound stream
-func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID string, logger *slog.Logger) *OutboundStream {
+func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, logger *slog.Logger) *OutboundStream {
 	return &OutboundStream{
 		adapter:         adapter,
 		cfg:             cfg,
@@ -46,6 +48,8 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		reqID:           reqID,
 		chatID:          chatID,
 		userID:          userID,
+		chatType:        chatType,
+		isMentioned:     isMentioned,
 		streamID:        generateStreamID(),
 		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
 		minInterval:     100 * time.Millisecond, // 100ms interval for smooth streaming
@@ -186,22 +190,36 @@ func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, f
 		},
 	}
 
+	// Determine which command to use based on chat type and mention status
+	// - 单聊 (single): always use CmdRespondMsg
+	// - 群聊且被@ (group + isMentioned): use CmdRespondMsg (reply to the mention)
+	// - 群聊未被@ (group + !isMentioned): use CmdSendMsg (proactive send)
+	cmd := CmdRespondMsg
+	if s.chatType == "group" && !s.isMentioned {
+		cmd = CmdSendMsg
+		s.logger.Debug("using proactive send for group message without mention",
+			slog.String("chat_type", s.chatType),
+			slog.Bool("is_mentioned", s.isMentioned))
+	}
+
 	// Use fast path for streaming (no ACK wait) to improve latency
 	// Intermediate updates use async SendStream for low latency
 	// Final message uses SendReply to ensure delivery (waits for ACK)
 	if finish {
 		// Final message - use SendReply which waits for ACK to ensure delivery
 		// This prevents message truncation issues
-		if err := s.wsClient.SendReply(ctx, s.reqID, body, CmdRespondMsg); err != nil {
+		if err := s.wsClient.SendReply(ctx, s.reqID, body, cmd); err != nil {
 			return fmt.Errorf("send stream response: %w", err)
 		}
 		s.sent.Store(true)
 		s.logger.Info("final stream response sent successfully",
 			slog.String("stream_id", s.streamID),
+			slog.String("cmd", cmd),
 			slog.Int("content_len", len(content)))
 	} else {
 		// Intermediate update - use SendStream for low latency
-		if err := s.wsClient.SendStream(ctx, s.reqID, body); err != nil {
+		// For intermediate updates in group chats without mention, we still need to use CmdSendMsg
+		if err := s.wsClient.SendStream(ctx, s.reqID, body, cmd); err != nil {
 			return fmt.Errorf("send stream update: %w", err)
 		}
 	}

@@ -181,6 +181,8 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 	reqID := ""
 	chatID := ""
 	userID := ""
+	chatType := ""
+	isMentioned := false
 	if opts.Metadata != nil {
 		if v, ok := opts.Metadata["req_id"].(string); ok {
 			reqID = v
@@ -190,6 +192,12 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		}
 		if v, ok := opts.Metadata["user_id"].(string); ok {
 			userID = v
+		}
+		if v, ok := opts.Metadata["chattype"].(string); ok {
+			chatType = v
+		}
+		if v, ok := opts.Metadata["is_mentioned"].(bool); ok {
+			isMentioned = v
 		}
 	}
 
@@ -204,7 +212,7 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		userID = strings.TrimPrefix(target, "user_id:")
 	}
 
-	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, a.logger), nil
+	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, a.logger), nil
 }
 
 // Send sends a message directly (non-streaming)

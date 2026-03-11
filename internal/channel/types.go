@@ -71,7 +71,7 @@ func (m InboundMessage) RoutingKey() string {
 func GenerateRoutingKey(platform, botID, conversationID, conversationType, senderID string) string {
 	parts := []string{platform, botID, conversationID}
 	ct := strings.ToLower(strings.TrimSpace(conversationType))
-	if ct != "" && ct != "p2p" && ct != "private" {
+	if ct != "" && ct != "p2p" && ct != "private" && ct != "single" {
 		senderID = strings.TrimSpace(senderID)
 		if senderID != "" {
 			parts = append(parts, senderID)

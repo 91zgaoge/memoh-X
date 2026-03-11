@@ -4,7 +4,7 @@
 
 **Real Isolation · Real Memory · Real Evolution — The Uncompromising AI Agent Platform**
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--v3-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs)](https://vuejs.org)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docs.docker.com/compose/)
@@ -24,7 +24,7 @@ Others edit memory files by hand — our bots reflect, experiment, and review on
 **Requires Docker:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Kxiandaoyan/Memoh-v2/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/91zgaoge/memoh-X/main/scripts/install.sh | sh
 ```
 
 > Silent install (skip prompts): `curl -fsSL ... | sh -s -- -y`
@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/Kxiandaoyan/Memoh-v2/main/scripts/i
 Or manually:
 
 ```bash
-git clone --depth 1 https://github.com/Kxiandaoyan/Memoh-v2.git
+git clone --depth 1 https://github.com/91zgaoge/memoh-X.git
 cd Memoh-v2
 docker compose up -d
 ```

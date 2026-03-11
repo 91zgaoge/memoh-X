@@ -11,8 +11,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/memohai/memoh/internal/channel"
-	"github.com/memohai/memoh/internal/media"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/media"
 )
 
 const (

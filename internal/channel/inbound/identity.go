@@ -550,7 +550,7 @@ func isGroupConversationType(conversationType string) bool {
 	if ct == "" {
 		return false
 	}
-	return ct != "p2p" && ct != "private" && ct != "direct"
+	return ct != "p2p" && ct != "private" && ct != "direct" && ct != "single"
 }
 
 func (r *IdentityResolver) tryLinkConfiglessChannelIdentityToUser(ctx context.Context, msg channel.InboundMessage, channelIdentityID string) string {

@@ -238,7 +238,7 @@ func determineConversationKind(threadID, conversationType string) string {
 		return conversation.KindThread
 	}
 	ct := strings.ToLower(strings.TrimSpace(conversationType))
-	if ct == "p2p" || ct == "private" || ct == "" {
+	if ct == "p2p" || ct == "private" || ct == "" || ct == "single" {
 		return conversation.KindDirect
 	}
 	return conversation.KindGroup

@@ -3422,7 +3422,7 @@ func parseResolverUUID(id string) (pgtype.UUID, error) {
 // isDirectConversationType returns true for DM/private conversations.
 func isDirectConversationType(conversationType string) bool {
 	ct := strings.ToLower(strings.TrimSpace(conversationType))
-	return ct == "" || ct == "p2p" || ct == "private" || ct == "direct"
+	return ct == "" || ct == "p2p" || ct == "private" || ct == "direct" || ct == "single"
 }
 
 // limitHistoryTurns limits conversation history to the last N user turns (and their associated

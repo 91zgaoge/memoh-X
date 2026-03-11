@@ -9,7 +9,7 @@
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go" /></a>
   <a href="https://vuejs.org"><img src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white" alt="Vue 3" /></a>
   <a href="https://docs.docker.com/compose/"><img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker" /></a>
-  <a href="https://github.com/Kxiandaoyan/Memoh-v2/stargazers"><img src="https://img.shields.io/github/stars/Kxiandaoyan/Memoh-v2?style=social" alt="Stars" /></a>
+  <a href="https://github.com/91zgaoge/memoh-X/stargazers"><img src="https://img.shields.io/github/stars/91zgaoge/memoh-X?style=social" alt="Stars" /></a>
 </p>
 
 <p>
@@ -65,7 +65,7 @@ Bot 自己反思、实验、审查，持续进化，不是手动编辑记忆文�
 **一键安装（需要 Docker）：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Kxiandaoyan/Memoh-v2/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/91zgaoge/memoh-X/main/scripts/install.sh | sh
 ```
 
 > 静默安装（跳过交互）：`curl -fsSL ... | sh -s -- -y`
@@ -73,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/Kxiandaoyan/Memoh-v2/main/scripts/i
 或手动：
 
 ```bash
-git clone --depth 1 https://github.com/Kxiandaoyan/Memoh-v2.git
+git clone --depth 1 https://github.com/91zgaoge/memoh-X.git
 cd Memoh-v2
 docker compose up -d
 ```
@@ -413,10 +413,10 @@ Bot 不是静态的 prompt，而是会成长的智能体：
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/#Kxiandaoyan/Memoh-v2&Date">
+<a href="https://www.star-history.com/#91zgaoge/memoh-X&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Kxiandaoyan/Memoh-v2&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Kxiandaoyan/Memoh-v2&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Kxiandaoyan/Memoh-v2&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=91zgaoge/memoh-X&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=91zgaoge/memoh-X&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=91zgaoge/memoh-X&type=Date" />
  </picture>
 </a>

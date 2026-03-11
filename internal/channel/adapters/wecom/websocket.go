@@ -584,12 +584,19 @@ func (c *WebSocketClient) SendReply(ctx context.Context, reqID string, body inte
 // SendStream sends a stream message. For intermediate updates (finish=false),
 // it uses fire-and-forget for low latency. For final messages (finish=true),
 // it uses the serial queue to ensure delivery.
-func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody) error {
+// The cmd parameter specifies the command to use (CmdRespondMsg for replies, CmdSendMsg for proactive sends).
+func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody, cmd ...string) error {
+	// Determine which command to use (default to CmdRespondMsg for backward compatibility)
+	cmdToUse := CmdRespondMsg
+	if len(cmd) > 0 && cmd[0] != "" {
+		cmdToUse = cmd[0]
+	}
+
 	// For final messages, use queue to ensure delivery
 	if body.Stream.Finish {
 		return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
 			frame := WebsocketMessage{
-				Cmd:     CmdRespondMsg,
+				Cmd:     cmdToUse,
 				Headers: MessageHeaders{ReqID: reqID},
 			}
 
@@ -640,7 +647,7 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 	}
 
 	frame := WebsocketMessage{
-		Cmd:     CmdRespondMsg,
+		Cmd:     cmdToUse,
 		Headers: MessageHeaders{ReqID: reqID},
 	}
 

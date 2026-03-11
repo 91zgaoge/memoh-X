@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/memohai/memoh/internal/channel"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
 )
 
 func TestQQOutboundStreamFlushesBufferedTextOnFinal(t *testing.T) {

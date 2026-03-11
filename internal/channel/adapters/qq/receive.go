@@ -13,7 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/memohai/memoh/internal/channel"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
 )
 
 const (

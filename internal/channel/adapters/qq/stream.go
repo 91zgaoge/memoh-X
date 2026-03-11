@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/memohai/memoh/internal/channel"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
 )
 
 type qqOutboundStream struct {

@@ -561,7 +561,7 @@ func shouldTriggerAssistantResponse(msg channel.InboundMessage, groupRequireMent
 
 func isDirectConversationType(conversationType string) bool {
 	ct := strings.ToLower(strings.TrimSpace(conversationType))
-	return ct == "" || ct == "p2p" || ct == "private" || ct == "direct"
+	return ct == "" || ct == "p2p" || ct == "private" || ct == "direct" || ct == "single"
 }
 
 func hasCommandPrefix(text string, metadata map[string]any) bool {
