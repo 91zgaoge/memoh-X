@@ -91,6 +91,7 @@ func (s *OutboundStream) sendLoop() {
 }
 
 // flushBuffer sends the current buffer content if there's anything new
+// Uses fire-and-forget mode for intermediate updates to ensure smooth streaming
 func (s *OutboundStream) flushBuffer() {
 	if s.closed.Load() {
 		return
@@ -102,12 +103,15 @@ func (s *OutboundStream) flushBuffer() {
 
 	// Only send if there's new content since last send
 	if len(content) > s.lastSentLen {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Use background context with short timeout for fire-and-forget
+		// This ensures we don't block the stream waiting for ACK
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Don't let send errors stop the stream
+		// Send as intermediate update (finish=false) using fire-and-forget mode
+		// Errors are logged but don't interrupt the stream
 		if err := s.sendStreamUpdate(ctx, content, false); err != nil {
-			s.logger.Debug("buffered send failed", slog.Any("error", err))
+			s.logger.Debug("buffered send failed (non-critical)", slog.Any("error", err))
 		}
 	}
 }
@@ -271,6 +275,9 @@ func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, f
 }
 
 // sendChunk sends a single chunk using the original streamID
+// Uses dual-mode strategy:
+//   - Intermediate chunks (finish=false): fire-and-forget for smooth streaming
+//   - Final chunk (finish=true): wait for ACK to ensure delivery
 func (s *OutboundStream) sendChunk(ctx context.Context, content string, finish bool) error {
 	s.mu.Lock()
 
@@ -303,22 +310,30 @@ func (s *OutboundStream) sendChunk(ctx context.Context, content string, finish b
 		cmd = CmdSendMsg
 	}
 
-	// All messages are sent via queue with ACK wait to ensure order and delivery
-	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
-		return fmt.Errorf("send chunk: %w", err)
-	}
-
+	// Dual-mode sending strategy for chunks
 	if finish {
+		// Final chunk: wait for ACK to ensure delivery
+		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+			return fmt.Errorf("send chunk: %w", err)
+		}
 		s.sent.Store(true)
 		s.logger.Info("final chunk sent successfully",
 			slog.String("stream_id", streamID),
 			slog.Int("content_bytes", len(content)))
+	} else {
+		// Intermediate chunk: fire-and-forget for speed
+		if err := wsClient.SendStreamFireAndForget(reqID, body, cmd); err != nil {
+			return fmt.Errorf("send chunk: %w", err)
+		}
 	}
 
 	return nil
 }
 
 // sendSingleUpdate sends a single stream update to WeCom
+// Uses dual-mode strategy:
+//   - Intermediate updates (finish=false): fire-and-forget for smooth streaming
+//   - Final message (finish=true): wait for ACK to ensure delivery
 func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, finish bool) error {
 	s.mu.Lock()
 
@@ -362,17 +377,28 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 			slog.Bool("is_mentioned", isMentioned))
 	}
 
-	// All messages are sent via queue with ACK wait to ensure order and delivery
-	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
-		return fmt.Errorf("send stream update: %w", err)
-	}
-
+	// Dual-mode sending strategy:
+	// - Intermediate updates: use fire-and-forget for smooth streaming experience
+	// - Final message: use ACK-wait to ensure delivery
 	if finish {
+		// Final message: wait for ACK to ensure delivery
+		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+			return fmt.Errorf("send stream update: %w", err)
+		}
 		s.sent.Store(true)
 		s.logger.Info("final stream response sent successfully",
 			slog.String("stream_id", streamID),
 			slog.String("cmd", cmd),
 			slog.Int("content_bytes", len(content)))
+	} else {
+		// Intermediate update: fire-and-forget for speed
+		// Errors are logged but not returned to avoid disrupting the stream
+		if err := wsClient.SendStreamFireAndForget(reqID, body, cmd); err != nil {
+			s.logger.Debug("intermediate update send failed (non-critical)",
+				slog.Any("error", err),
+				slog.String("stream_id", streamID))
+			// Don't return error for intermediate updates - keep streaming
+		}
 	}
 
 	s.mu.Lock()

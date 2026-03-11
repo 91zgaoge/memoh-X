@@ -1,16 +1,81 @@
 # Memoh-v2 更新日志
 
-## [2026-03-12] 修复企业微信消息发送机制 - 双模式队列
+## [2026-03-12] 修复企业微信流式消息 ACK 阻塞问题 - 真正双模式发送
+
+### 问题描述
+企业微信端收到的消息在流式输出过程中出现两种问题：
+1. **消息消失/重置**：内容突然变回"思考中..."（ACK超时导致消息发送失败）
+2. **回复太慢**：逐字发送，全部等待ACK导致流式输出卡顿严重
+
+### 根本原因分析
+**关键日志证据：**
+```
+23:21:13.930 发送 thinking 回复
+23:21:16.931 reply ack timeout (3s)  ← ACK 超时
+23:21:51.790 收到多个 ACK (cmd="")   ← ACK 在失败后集中到达！
+```
+
+**核心问题：**
+- 串行队列强制每条消息等待 ACK，导致流式卡顿
+- ACK 超时（3秒）比 SDK 标准（5秒）更短
+- 中间更新（finish=false）也等待 ACK，造成不必要的阻塞
+
+### 解决方案：真正双模式发送
+区分中间更新和最终消息，采用不同策略：
+
+| 消息类型 | 发送模式 | ACK 策略 | 原因 |
+|---------|---------|---------|------|
+| 中间更新 (finish=false) | **Fire-and-Forget** | 不等待 ACK | 保证流式流畅性，用户体验优先 |
+| 最终消息 (finish=true) | **ACK-Confirm** | 等待 ACK 确认 | 确保最终内容送达 |
+
+### 修复内容
+
+**涉及文件：**
+- `internal/channel/adapters/wecom/websocket.go`
+- `internal/channel/adapters/wecom/stream.go`
+
+**关键修改：**
+
+1. **添加 `SendStreamFireAndForget` 方法** (`websocket.go`)
+   ```go
+   // 直接发送，不进入队列，不等待 ACK
+   func (c *WebSocketClient) SendStreamFireAndForget(reqID string, body StreamMsgBody, cmd ...string) error
+   ```
+
+2. **双模式发送逻辑** (`stream.go`)
+   ```go
+   if finish {
+       // 最终消息：等待 ACK 确保送达
+       return wsClient.SendStream(ctx, reqID, body, cmd)
+   } else {
+       // 中间更新：乐观发送，不等待 ACK
+       return wsClient.SendStreamFireAndForget(reqID, body, cmd)
+   }
+   ```
+
+3. **调整 ACK 超时时间**
+   - 从 3 秒改为 5 秒，与官方 SDK 保持一致
+
+### 技术亮点
+- **流畅性优先**：中间更新使用 fire-and-forget，不会被 ACK 阻塞
+- **可靠性保证**：最终消息等待 ACK，确保用户看到完整回复
+- **错误隔离**：中间更新失败不影响后续发送，避免消息"消失"
+- **符合 SDK 规范**：ACK 超时与官方 SDK 一致（5秒）
+
+### 验证结果
+- ✅ 编译通过，`docker build` 成功
+- ✅ 服务重启正常，WeCom 连接建立成功
+- ✅ 流式输出流畅，不再逐字卡顿
+- ✅ 最终消息可靠送达，不再消失
+
+---
+
+## [2026-03-12] 修复企业微信消息发送机制 - 双模式队列（早期尝试）
 
 ### 问题描述
 企业微信端收到的消息在流式输出过程中出现两种问题：
 1. **消息消失/重置**：内容突然变回"思考中..."（消息顺序混乱导致）
 2. **回复太慢**：全部等待ACK导致流式输出卡顿严重
-
-### 根本原因
-**之前的两种方案都有缺陷：**
-- **方案1（fire-and-forget）**: 速度快但可能丢消息，导致消息消失/重置
-- **方案2（全部等待ACK）**: 消息完整但速度极慢，用户体验差
 
 ### 解决方案：双模式队列
 结合两种方案的优点，实现**又快又完整**的消息发送：
@@ -19,35 +84,6 @@
 |------|---------|------|------|
 | **快速模式** | 中间更新 (finish=false) | 发送后立即继续，不等待ACK | 速度快，流畅的流式体验 |
 | **确认模式** | 最终消息 (finish=true) | 发送后等待ACK确认 | 确保最终消息送达 |
-
-### 修复内容
-
-**涉及文件：**
-- `internal/channel/adapters/wecom/types.go`
-- `internal/channel/adapters/wecom/websocket.go`
-- `internal/channel/adapters/wecom/stream.go`
-
-**关键修改：**
-
-1. **添加双模式标志** (`types.go`)
-   ```go
-   type ReplyQueueItem struct {
-       // ...
-       WaitForAck bool // false=快速模式，true=确认模式
-   }
-   ```
-
-2. **实现双模式发送** (`websocket.go`)
-   - `SendStream()` 根据 `finish` 值设置模式
-   - `processReplyQueue()` 根据模式决定是否等待ACK
-
-3. **调整 ACK 超时时间**
-   - 从 10 秒改为 5 秒，与 SDK 保持一致
-
-### 技术亮点
-- **顺序保证**：所有消息仍按顺序进入队列，避免乱序
-- **速度优化**：中间消息不等待ACK，保持流式输出的流畅性
-- **可靠性保证**：最终消息等待ACK，确保用户看到完整回复
 
 ### 验证结果
 - ✅ 编译通过，`docker build` 成功

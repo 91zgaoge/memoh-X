@@ -32,10 +32,9 @@ const (
 	// Max missed pong before reconnect
 	MaxMissedPong = 2
 
-	// Reply ack timeout (10 seconds - balance between reliability and speed)
-	// ReplyAckTimeout is the timeout for waiting for ACK from WeCom server.
-	// Reduced to 3s for faster streaming while still ensuring delivery.
-	ReplyAckTimeout = 3 * time.Second
+	// Reply ack timeout - 与 SDK 保持一致为 5 秒
+	// SDK (ws.ts:55) 使用 5000ms，我们保持一致以确保可靠性
+	ReplyAckTimeout = 5 * time.Second
 
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
@@ -587,6 +586,7 @@ func (c *WebSocketClient) SendReply(ctx context.Context, reqID string, body inte
 // All messages are sent serially via queue, waiting for ACK before sending next.
 // This ensures message order and delivery reliability.
 // The cmd parameter specifies the command to use (CmdRespondMsg for replies, CmdSendMsg for proactive sends).
+// Use this for final messages (finish=true) to ensure delivery.
 func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody, cmd ...string) error {
 	// Determine which command to use (default to CmdRespondMsg for backward compatibility)
 	cmdToUse := CmdRespondMsg
@@ -638,6 +638,51 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 			go c.processReplyQueue(reqID)
 		}
 	})
+}
+
+// SendStreamFireAndForget sends a stream message without waiting for ACK.
+// This is used for intermediate stream updates (finish=false) to ensure smooth streaming.
+// The message is sent directly without queuing, providing best-effort delivery.
+// For final messages (finish=true), use SendStream instead to ensure delivery.
+func (c *WebSocketClient) SendStreamFireAndForget(reqID string, body StreamMsgBody, cmd ...string) error {
+	// Determine which command to use
+	cmdToUse := CmdRespondMsg
+	if len(cmd) > 0 && cmd[0] != "" {
+		cmdToUse = cmd[0]
+	}
+
+	c.mu.RLock()
+	conn := c.conn
+	connected := c.connected
+	c.mu.RUnlock()
+
+	if !connected || conn == nil {
+		return fmt.Errorf("websocket not connected")
+	}
+
+	frame := WebsocketMessage{
+		Cmd:     cmdToUse,
+		Headers: MessageHeaders{ReqID: reqID},
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal stream body failed: %w", err)
+	}
+	frame.Body = bodyBytes
+
+	// Send directly without queuing or waiting for ACK
+	if err := conn.WriteJSON(frame); err != nil {
+		return fmt.Errorf("write stream message: %w", err)
+	}
+
+	c.logger.Debug("stream message sent (fire-and-forget)",
+		slog.String("req_id", reqID),
+		slog.String("stream_id", body.Stream.ID),
+		slog.Bool("finish", body.Stream.Finish),
+		slog.Int("content_bytes", len(body.Stream.Content)))
+
+	return nil
 }
 
 // processReplyQueue processes the reply queue for a specific req_id
