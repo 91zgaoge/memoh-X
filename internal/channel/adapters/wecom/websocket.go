@@ -33,7 +33,9 @@ const (
 	MaxMissedPong = 2
 
 	// Reply ack timeout (10 seconds - balance between reliability and speed)
-	ReplyAckTimeout = 10 * time.Second
+	// ReplyAckTimeout is the timeout for waiting for ACK from WeCom server.
+	// According to WeCom AI Bot SDK, this should be 5000ms.
+	ReplyAckTimeout = 5 * time.Second
 
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
@@ -581,9 +583,10 @@ func (c *WebSocketClient) SendReply(ctx context.Context, reqID string, body inte
 	})
 }
 
-// SendStream sends a stream message. For intermediate updates (finish=false),
-// it uses fire-and-forget for low latency. For final messages (finish=true),
-// it uses the serial queue to ensure delivery.
+// SendStream sends a stream message.
+// CRITICAL: All messages use the serial queue to ensure correct ordering and delivery.
+// According to WeCom AI Bot SDK, messages with the same req_id must be sent serially,
+// waiting for ACK before sending the next one.
 // The cmd parameter specifies the command to use (CmdRespondMsg for replies, CmdSendMsg for proactive sends).
 func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody, cmd ...string) error {
 	// Determine which command to use (default to CmdRespondMsg for backward compatibility)
@@ -592,87 +595,52 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 		cmdToUse = cmd[0]
 	}
 
-	// For final messages, use queue to ensure delivery
-	if body.Stream.Finish {
-		return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
-			frame := WebsocketMessage{
-				Cmd:     cmdToUse,
-				Headers: MessageHeaders{ReqID: reqID},
-			}
-
-			bodyBytes, err := json.Marshal(body)
-			if err != nil {
-				reject(fmt.Errorf("marshal stream body failed: %w", err))
-				return
-			}
-			frame.Body = bodyBytes
-
-			item := &ReplyQueueItem{
-				Frame:   frame,
-				Resolve: resolve,
-				Reject:  reject,
-			}
-
-			c.queueMu.Lock()
-			defer c.queueMu.Unlock()
-
-			queue, exists := c.replyQueues[reqID]
-			if !exists {
-				queue = []*ReplyQueueItem{}
-			}
-
-			if len(queue) >= MaxReplyQueueSize {
-				reject(fmt.Errorf("reply queue for req_id %s exceeds max size (%d)", reqID, MaxReplyQueueSize))
-				return
-			}
-
-			queue = append(queue, item)
-			c.replyQueues[reqID] = queue
-
-			if len(queue) == 1 {
-				go c.processReplyQueue(reqID)
-			}
-		})
-	}
-
-	// For intermediate updates, check connection and send synchronously
-	// but don't wait for ACK to avoid blocking
-	c.mu.RLock()
-	conn := c.conn
-	connected := c.connected
-	c.mu.RUnlock()
-
-	if !connected || conn == nil {
-		return fmt.Errorf("websocket not connected")
-	}
-
-	frame := WebsocketMessage{
-		Cmd:     cmdToUse,
-		Headers: MessageHeaders{ReqID: reqID},
-	}
-
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal stream body failed: %w", err)
-	}
-	frame.Body = bodyBytes
-
-	// Send synchronously but don't wait for ACK
-	// This ensures we catch connection errors immediately
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		if err := conn.WriteJSON(frame); err != nil {
-			c.logger.Warn("stream message send failed", slog.String("req_id", reqID), slog.Any("error", err))
-			// Trigger reconnect on write failure
-			go c.triggerReconnect()
-			return fmt.Errorf("websocket write failed: %w", err)
+	// CRITICAL: Always use queue for all messages to ensure ordering
+	// This matches the behavior of the official WeCom AI Bot SDK
+	return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
+		frame := WebsocketMessage{
+			Cmd:     cmdToUse,
+			Headers: MessageHeaders{ReqID: reqID},
 		}
-	}
 
-	c.logger.Debug("stream message sent", slog.String("req_id", reqID), slog.Bool("finish", body.Stream.Finish))
-	return nil
+		bodyBytes, err := json.Marshal(body)
+		if err != nil {
+			reject(fmt.Errorf("marshal stream body failed: %w", err))
+			return
+		}
+		frame.Body = bodyBytes
+
+		item := &ReplyQueueItem{
+			Frame:   frame,
+			Resolve: resolve,
+			Reject:  reject,
+		}
+
+		c.queueMu.Lock()
+		defer c.queueMu.Unlock()
+
+		queue, exists := c.replyQueues[reqID]
+		if !exists {
+			queue = []*ReplyQueueItem{}
+		}
+
+		if len(queue) >= MaxReplyQueueSize {
+			reject(fmt.Errorf("reply queue for req_id %s exceeds max size (%d)", reqID, MaxReplyQueueSize))
+			return
+		}
+
+		queue = append(queue, item)
+		c.replyQueues[reqID] = queue
+
+		c.logger.Debug("stream message queued",
+			slog.String("req_id", reqID),
+			slog.Int("queue_len", len(queue)),
+			slog.Bool("finish", body.Stream.Finish))
+
+		if len(queue) == 1 {
+			go c.processReplyQueue(reqID)
+		}
+	})
 }
 
 // processReplyQueue processes the reply queue for a specific req_id

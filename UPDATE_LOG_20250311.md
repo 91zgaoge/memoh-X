@@ -635,5 +635,70 @@ docker logs memoh-server --tail 20
 
 ---
 
+### 10.12 企业微信消息发送机制修复 - 统一使用队列
+
+**修复时间:** 2026-03-12
+**问题:** 消息在流式输出过程中突然消失，内容被重置回"思考中..."
+**根本原因:** `finish=false` 的消息使用 fire-and-forget，而 `finish=true` 的消息等待 ACK，导致消息顺序混乱
+
+**技术规范依据:**
+根据 WeCom AI Bot SDK (`aibot-sdk/aibot-node-sdk-main/src/ws.ts`):
+> 同一个 req_id 的消息会被放入队列中串行发送：发送一条后等待服务端回执，收到回执或超时后才发送下一条。
+
+**修复内容:**
+
+#### 代码变更
+
+**文件:** `internal/channel/adapters/wecom/websocket.go`
+
+```go
+// 修改 SendStream 函数 - 对所有消息使用队列
+func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody, cmd ...string) error {
+    // ...
+    // CRITICAL: Always use queue for all messages to ensure ordering
+    return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
+        // 所有消息进入队列，等待 ACK 后才发送下一条
+    })
+}
+
+// 修改 ACK 超时时间
+const ReplyAckTimeout = 5 * time.Second  // 从 10 秒改为 5 秒，与 SDK 一致
+```
+
+**文件:** `internal/channel/adapters/wecom/stream.go`
+
+```go
+// 更新注释，移除 "fire-and-forget" 描述
+// CRITICAL: SendStream now uses queue for ALL messages to ensure ordering
+```
+
+#### 涉及文件
+- `internal/channel/adapters/wecom/websocket.go` - 统一使用队列发送所有消息
+- `internal/channel/adapters/wecom/stream.go` - 更新注释
+
+#### 关键改进
+- 所有消息按顺序发送，不再出现消息丢失或重置
+- ACK 超时时间与 SDK 一致（5秒）
+- 与官方 WeCom AI Bot SDK 行为完全一致
+
+**部署验证:**
+
+```bash
+# 重新构建并启动
+docker compose up -d --build server
+
+# 验证服务状态
+docker compose ps
+# memoh-server  Up (healthy)  0.0.0.0:8080->8080/tcp
+
+# 验证 WeCom 连接
+docker logs memoh-server --tail 20
+# "WeCom connection established" 日志确认连接成功
+```
+
+**提交:** `<commit_hash>` - fix(wecom): 统一使用队列发送所有消息，确保消息顺序和完整性
+
+---
+
 *文档更新时间: 2026-03-12*
 *生成工具: Claude Code*

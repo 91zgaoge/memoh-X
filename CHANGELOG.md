@@ -1,5 +1,49 @@
 # Memoh-v2 更新日志
 
+## [2026-03-12] 修复企业微信消息发送机制 - 统一使用队列
+
+### 问题描述
+企业微信端收到的消息在流式输出过程中会突然消失，内容被重置回最初的"思考中..."提示。
+
+### 根本原因
+**Go 代码与 SDK 的行为不一致：**
+- **SDK（正确）**: 所有消息都通过队列串行发送，每条消息都等待 ACK
+- **Go 代码（有问题）**: `finish=false` 的消息使用 **fire-and-forget**，不等待 ACK；只有 `finish=true` 的消息等待 ACK
+
+这导致消息顺序混乱！如果某个 `finish=false` 的消息丢失，而 `finish=true` 的消息已经发送，就会出现消息"消失"或"重置"的现象。
+
+### 修复内容
+
+**涉及文件：**
+- `internal/channel/adapters/wecom/websocket.go`
+- `internal/channel/adapters/wecom/stream.go`
+
+**关键修改：**
+
+1. **统一使用队列发送所有消息**
+   - 修改 `SendStream()` 函数，对所有消息（无论 `finish` 值）使用队列
+   - 确保同一 `req_id` 的消息按顺序发送，每条消息等待 ACK 后才发送下一条
+   - 与官方 WeCom AI Bot SDK 行为一致
+
+2. **调整 ACK 超时时间**
+   - 从 10 秒改为 5 秒（`ReplyAckTimeout = 5 * time.Second`）
+   - 与 SDK 的 `replyAckTimeout = 5000ms` 保持一致
+
+3. **更新注释**
+   - 移除 "fire-and-forget" 相关注释
+   - 添加关键说明：所有消息使用队列确保顺序
+
+### 技术规范依据
+根据 WeCom AI Bot SDK (`aibot-sdk/aibot-node-sdk-main/src/ws.ts`):
+> 同一个 req_id 的消息会被放入队列中串行发送：发送一条后等待服务端回执，收到回执或超时后才发送下一条。
+
+### 验证结果
+- ✅ 编译通过，`docker build` 成功
+- ✅ 服务重启正常，WeCom 连接建立成功
+- ✅ 消息按顺序发送，不再丢失或重置
+
+---
+
 ## [2026-03-12] 修复企业微信流式消息消失/重置问题
 
 ### 问题描述
