@@ -80,6 +80,88 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 	}
 }
 
+// Type returns the channel type identifier for WeCom.
+func (a *Adapter) Type() channel.ChannelType {
+	return Type
+}
+
+// Descriptor returns the channel descriptor containing metadata and configuration schema.
+func (a *Adapter) Descriptor() channel.Descriptor {
+	return channel.Descriptor{
+		Type:        Type,
+		DisplayName: "企业微信",
+		Configless:  false,
+		Capabilities: channel.ChannelCapabilities{
+			Text:           true,
+			Markdown:       true,
+			RichText:       true,
+			Attachments:    true,
+			Media:          true,
+			Reactions:      false,
+			Reply:          true,
+			Streaming:      true,
+			BlockStreaming: false,
+		},
+		OutboundPolicy: channel.OutboundPolicy{
+			TextChunkLimit: 2000,
+			ChunkerMode:    channel.ChunkerModeMarkdown,
+			MediaOrder:     channel.OutboundOrderTextFirst,
+			RetryMax:       3,
+			RetryBackoffMs: 1000,
+		},
+		ConfigSchema: channel.ConfigSchema{
+			Version: 1,
+			Fields: map[string]channel.FieldSchema{
+				"bot_id": {
+					Type:        channel.FieldString,
+					Required:    true,
+					Title:       "Bot ID",
+					Description: "企业微信机器人ID",
+				},
+				"secret": {
+					Type:        channel.FieldSecret,
+					Required:    true,
+					Title:       "Secret",
+					Description: "企业微信机器人Secret",
+				},
+				"websocket_url": {
+					Type:        channel.FieldString,
+					Required:    false,
+					Title:       "WebSocket URL",
+					Description: "WebSocket连接地址（默认：wss://openws.work.weixin.qq.com）",
+					Example:     "wss://openws.work.weixin.qq.com",
+				},
+				"group_chat_enabled": {
+					Type:        channel.FieldBool,
+					Required:    false,
+					Title:       "启用群聊",
+					Description: "是否允许在群聊中响应",
+				},
+				"require_mention": {
+					Type:        channel.FieldBool,
+					Required:    false,
+					Title:       "需要@提及",
+					Description: "群聊中是否需要@机器人才响应",
+				},
+			},
+		},
+		UserConfigSchema: channel.ConfigSchema{
+			Version: 1,
+			Fields: map[string]channel.FieldSchema{
+				"user_id": {Type: channel.FieldString},
+				"name":    {Type: channel.FieldString},
+			},
+		},
+		TargetSpec: channel.TargetSpec{
+			Format: "user_id:xxx | name:xxx",
+			Hints: []channel.TargetHint{
+				{Label: "User ID", Example: "user_id:USER_ID"},
+				{Label: "Name", Example: "name:用户名"},
+			},
+		},
+	}
+}
+
 // sendThinkingReply sends an immediate "thinking" response to improve user experience
 func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClient, reqID string) {
 	if wsClient == nil || reqID == "" {
@@ -101,29 +183,6 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 		a.logger.Debug("failed to send thinking reply", slog.Any("error", err))
 	} else {
 		a.logger.Info("thinking reply sent", slog.String("req_id", reqID))
-	}
-}
-
-// Type returns the channel type
-func (a *Adapter) Type() channel.ChannelType {
-	return Type
-}
-
-// Descriptor returns the channel descriptor
-func (a *Adapter) Descriptor() channel.Descriptor {
-	return channel.Descriptor{
-		Type:        Type,
-		DisplayName: "WeCom",
-		Capabilities: channel.ChannelCapabilities{
-			Text:           true,
-			Markdown:       true,
-			Attachments:    true,
-			Media:          true,
-			Streaming:      true,
-			BlockStreaming: false,
-			Reply:          true,
-			ChatTypes:      []string{"single", "group"},
-		},
 	}
 }
 
