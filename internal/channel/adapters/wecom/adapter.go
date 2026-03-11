@@ -103,7 +103,10 @@ func (a *Adapter) Descriptor() channel.Descriptor {
 			BlockStreaming: false,
 		},
 		OutboundPolicy: channel.OutboundPolicy{
-			TextChunkLimit: 2000,
+			// 企业微信 AI Bot SDK 限制：单条消息最长 20480 字节
+			// UTF-8 中文字符通常占 3 字节，设置 6800 字符约等于 20400 字节（全中文场景）
+			// 实际分片逻辑在 stream.go 中按字节精确处理
+			TextChunkLimit: 6800,
 			ChunkerMode:    channel.ChunkerModeMarkdown,
 			MediaOrder:     channel.OutboundOrderTextFirst,
 			RetryMax:       3,

@@ -39,6 +39,9 @@ type OutboundStream struct {
 // StreamTimeout 流式消息超时时间（6分钟）
 const StreamTimeout = 6 * time.Minute
 
+// MaxContentBytes 单条消息最大字节数（企业微信 AI Bot SDK 限制：20480 字节）
+const MaxContentBytes = 20480
+
 // NewOutboundStream creates a new outbound stream
 func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, logger *slog.Logger) *OutboundStream {
 	return &OutboundStream{
@@ -170,14 +173,54 @@ func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, f
 		return nil
 	}
 
-	// Truncate if too long (WeCom has limits)
-	if len(content) > 4000 {
-		content = content[:4000] + "\n\n... (内容已截断)"
+	// Check if content exceeds byte limit (WeCom AI Bot SDK limit: 20480 bytes)
+	contentBytes := []byte(content)
+	if len(contentBytes) > MaxContentBytes {
+		// Content too long, need to split and send in chunks
+		return s.sendSplitContent(ctx, content, finish)
 	}
 
+	// Send normally
+	return s.sendSingleUpdate(ctx, content, finish)
+}
+
+// sendSplitContent splits long content into multiple messages and sends them sequentially
+func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, finish bool) error {
+	chunks := splitContentByBytes(content, MaxContentBytes-100) // Reserve space for continuation indicator
+
+	s.logger.Info("splitting long content into chunks",
+		slog.Int("total_chunks", len(chunks)),
+		slog.Int("total_bytes", len(content)))
+
+	for i, chunk := range chunks {
+		isLastChunk := (i == len(chunks)-1)
+
+		// Add continuation indicator if not the last chunk
+		if !isLastChunk {
+			chunk = chunk + "\n\n...(继续)"
+		}
+
+		// Last chunk uses the passed finish value, others use false
+		chunkFinish := isLastChunk && finish
+
+		if err := s.sendSingleUpdate(ctx, chunk, chunkFinish); err != nil {
+			return fmt.Errorf("send chunk %d/%d: %w", i+1, len(chunks), err)
+		}
+
+		// Add delay between chunks to avoid rate limiting
+		if !isLastChunk {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	return nil
+}
+
+// sendSingleUpdate sends a single stream update to WeCom
+func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, finish bool) error {
 	s.logger.Debug("sending stream update",
 		slog.String("stream_id", s.streamID),
-		slog.Int("content_len", len(content)),
+		slog.Int("content_bytes", len(content)),
 		slog.Bool("finish", finish))
 
 	// Send stream update using WeCom stream format
@@ -207,7 +250,6 @@ func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, f
 	// Final message uses SendReply to ensure delivery (waits for ACK)
 	if finish {
 		// Final message - use SendReply which waits for ACK to ensure delivery
-		// This prevents message truncation issues
 		if err := s.wsClient.SendReply(ctx, s.reqID, body, cmd); err != nil {
 			return fmt.Errorf("send stream response: %w", err)
 		}
@@ -215,10 +257,9 @@ func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, f
 		s.logger.Info("final stream response sent successfully",
 			slog.String("stream_id", s.streamID),
 			slog.String("cmd", cmd),
-			slog.Int("content_len", len(content)))
+			slog.Int("content_bytes", len(content)))
 	} else {
 		// Intermediate update - use SendStream for low latency
-		// For intermediate updates in group chats without mention, we still need to use CmdSendMsg
 		if err := s.wsClient.SendStream(ctx, s.reqID, body, cmd); err != nil {
 			return fmt.Errorf("send stream update: %w", err)
 		}
@@ -252,4 +293,76 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 // generateStreamID generates a unique stream ID
 func generateStreamID() string {
 	return fmt.Sprintf("stream_%d", time.Now().UnixNano())
+}
+
+// splitContentByBytes splits content into chunks respecting byte limit.
+// It prioritizes splitting at paragraph boundaries, then line boundaries,
+// then sentence boundaries, and finally at word boundaries.
+func splitContentByBytes(content string, maxBytes int) []string {
+	contentBytes := []byte(content)
+	if len(contentBytes) <= maxBytes {
+		return []string{content}
+	}
+
+	var chunks []string
+	remaining := content
+
+	for len(remaining) > 0 {
+		remainingBytes := []byte(remaining)
+		if len(remainingBytes) <= maxBytes {
+			chunks = append(chunks, remaining)
+			break
+		}
+
+		// Find the best split point within maxBytes
+		chunk := truncateByBytes(remaining, maxBytes)
+
+		// Try to split at paragraph boundary (\n\n)
+		if idx := strings.LastIndex(chunk, "\n\n"); idx > maxBytes/2 {
+			chunk = remaining[:idx]
+			chunks = append(chunks, chunk)
+			remaining = remaining[idx+2:]
+			continue
+		}
+
+		// Try to split at line boundary (\n)
+		if idx := strings.LastIndex(chunk, "\n"); idx > maxBytes/2 {
+			chunk = remaining[:idx]
+			chunks = append(chunks, chunk)
+			remaining = remaining[idx+1:]
+			continue
+		}
+
+		// Try to split at sentence boundary (Chinese and English punctuation)
+		if idx := strings.LastIndexAny(chunk, "。！？.!?"); idx > maxBytes/2 {
+			chunk = remaining[:idx+1]
+			chunks = append(chunks, chunk)
+			remaining = remaining[idx+1:]
+			continue
+		}
+
+		// Force split (ensure we don't cut a UTF-8 character)
+		chunks = append(chunks, chunk)
+		remaining = remaining[len(chunk):]
+	}
+
+	return chunks
+}
+
+// truncateByBytes truncates a string to maxBytes without breaking UTF-8 characters.
+// It looks backward from maxBytes to find a valid UTF-8 character boundary.
+func truncateByBytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+
+	// Look backward to find a valid UTF-8 character boundary
+	// In UTF-8, continuation bytes start with 10xxxxxx (0x80-0xBF)
+	// Non-continuation bytes start with 0xxxxxxx (0x00-0x7F) or 11xxxxxx (0xC0-0xFF)
+	for i := maxBytes; i > maxBytes-4 && i > 0; i-- {
+		if (s[i] & 0xC0) != 0x80 {
+			return s[:i]
+		}
+	}
+	return s[:maxBytes]
 }
