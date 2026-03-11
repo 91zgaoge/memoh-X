@@ -1,5 +1,63 @@
 # Memoh-v2 更新日志
 
+## [2026-03-12] 修复企业微信长消息截断问题
+
+### 问题描述
+企业微信适配器将回复内容截断为 4000 字符，远低于企业微信 AI Bot SDK 允许的 **20480 字节**限制，导致长消息内容丢失，用户无法看到完整回复。
+
+### 修复内容
+
+#### 1. 消息长度限制调整
+
+**涉及文件：**
+- `internal/channel/adapters/wecom/stream.go`
+- `internal/channel/adapters/wecom/adapter.go`
+
+**修改内容：**
+1. 将限制从 4000 字符改为 **20480 字节**（UTF-8 编码）
+2. 实现长消息自动分片发送机制
+3. 更新 `TextChunkLimit`: 2000 → 6800（约 20400 字节全中文场景）
+
+#### 2. 智能分片发送机制
+
+**新增函数：**
+```go
+// 按字节长度分片，优先保持内容完整性
+func splitContentByBytes(content string, maxBytes int) []string
+
+// UTF-8 安全截断，不截断多字节字符
+func truncateByBytes(s string, maxBytes int) string
+```
+
+**分片策略（优先级排序）：**
+1. 段落边界（`\n\n`）- 保持 Markdown 格式
+2. 换行符（`\n`）- 保持行完整性
+3. 句子边界（。！？.!?）- 保持语义完整
+4. 强制截断（UTF-8 字符安全）
+
+#### 3. 用户体验优化
+
+- 非最后一片添加 `...(继续)` 提示
+- 分片间添加 200ms 延迟避免触发频率限制（30条/分钟）
+- 最后一片正确使用 `finish=true` 结束流式消息
+
+### 技术规范
+
+根据企业微信 AI Bot SDK 文档：
+> 流式消息 `content` 字段最长不超过 **20480 个字节**，必须是 utf8 编码
+
+参考：`aibot-sdk/aibot-node-sdk-main/src/types/api.ts` 第 91 行
+
+### 验证结果
+- ✅ 编译通过，`docker build` 成功
+- ✅ 服务重启正常，WeCom 连接建立成功
+- ✅ 超过 20480 字节的消息自动分片发送
+
+### 相关提交
+- `ec2fd2c6` - fix(wecom): 解决长消息被截断问题，确保回复内容完整性
+
+---
+
 ## [2026-03-11] 修复企业微信(WeCom)群聊消息回复问题
 
 ### 问题描述

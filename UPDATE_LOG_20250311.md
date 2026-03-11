@@ -499,5 +499,73 @@ docker exec memoh-containerd ctr task exec --exec-id test <container-id> \
 
 ---
 
+### 10.10 企业微信长消息截断修复
+
+**修复时间:** 2026-03-12
+**问题:** 长消息被截断为 4000 字符，用户无法看到完整回复
+**根本原因:** 限制过于保守，远低于 SDK 允许的 20480 字节
+
+**修复内容:**
+
+#### 代码变更
+
+**文件:** `internal/channel/adapters/wecom/stream.go`
+
+```go
+// 新增常量
+const MaxContentBytes = 20480  // 企业微信 AI Bot SDK 限制
+
+// 新增分片函数
+func splitContentByBytes(content string, maxBytes int) []string
+func truncateByBytes(s string, maxBytes int) string
+
+// 重构发送逻辑
+func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, finish bool) error
+func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, finish bool) error
+```
+
+**文件:** `internal/channel/adapters/wecom/adapter.go`
+
+```go
+OutboundPolicy: channel.OutboundPolicy{
+    TextChunkLimit: 6800,  // 约 20400 字节（全中文场景）
+    ChunkerMode:    channel.ChunkerModeMarkdown,
+}
+```
+
+#### 分片策略
+
+| 优先级 | 分割点 | 说明 |
+|--------|--------|------|
+| 1 | `\n\n` | 段落边界，保持 Markdown 格式 |
+| 2 | `\n` | 换行符，保持行完整性 |
+| 3 | `。！？.!?` | 句子边界，保持语义完整 |
+| 4 | 字节边界 | UTF-8 安全强制截断 |
+
+#### 用户体验
+
+- 分片消息添加 `...(继续)` 提示
+- 200ms 延迟避免频率限制
+- 最后一片正确设置 `finish=true`
+
+#### 部署验证
+
+```bash
+# 重新构建并启动
+docker compose up -d --build server
+
+# 验证服务状态
+docker compose ps
+# memoh-server  Up (healthy)  0.0.0.0:8080->8080/tcp
+
+# 验证 WeCom 连接
+docker logs memoh-server --tail 20
+# "WeCom connection established" 日志确认连接成功
+```
+
+**提交:** `ec2fd2c6` - fix(wecom): 解决长消息被截断问题，确保回复内容完整性
+
+---
+
 *文档更新时间: 2026-03-12*
 *生成工具: Claude Code*
