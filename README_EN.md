@@ -57,6 +57,26 @@ After installation, configure in this order:
 
 ---
 
+## Multi-Platform Channel Support
+
+One Bot serving multiple platforms simultaneously with cross-platform message synchronization:
+
+| Platform | DM | Group | @ Mention | Passive Sync | Special Features |
+|----------|:--:|:-----:|:---------:|:------------:|------------------|
+| **Telegram** | ✅ | ✅ | ✅ | ✅ | Typing indicator |
+| **Lark (Feishu)** | ✅ | ✅ | ✅ | ✅ | Card messages |
+| **WeCom** | ✅ | ✅ | ✅ | ✅ | **Instant "Thinking..." reply** |
+| **QQ Channel** | ✅ | ✅ | ✅ | ✅ | Official Bot API |
+| **Discord** | ✅ | ✅ | ✅ | ✅ | Streaming output |
+| **Web Chat** | ✅ | — | — | — | Real-time streaming |
+| **CLI** | ✅ | — | — | — | Local debugging |
+
+- **Cross-platform Identity**: Users can bind the same identity across different platforms
+- **Group Passive Sync**: Non-@ messages in groups are automatically stored in conversation history
+- **Processing Status**: Platforms like Lark show "Thinking..." status feedback
+
+---
+
 ## Architecture Overview
 
 ```
@@ -112,7 +132,7 @@ After installation, configure in this order:
 - **Conversation & Streaming** — SSE real-time streaming + synchronous modes, automatic context management and memory recall
 - **Three-Layer Memory** — Vector semantic search + BM25 keywords + LLM smart extraction, auto-indexed after each turn
 - **Isolated Container Sandbox** — Each bot gets a containerd container with file I/O, shell, browser, and snapshot rollback
-- **Multi-Platform Channels** — Telegram / Lark / Web chat / CLI with cross-platform identity unification
+- **Multi-Platform Channels** — Telegram / Lark / WeCom / QQ / Discord / Web chat / CLI with cross-platform identity unification
 - **MCP Tool System** — 15 built-in tools + any external MCP server, Stdio and Remote transport
 - **Heartbeat & Scheduling** — Periodic + event-driven dual-mode triggers; bots act proactively
 - **Self-Evolution** — Three-phase organic cycle (Reflect / Experiment / Review) with full evolution log tracking
@@ -152,6 +172,33 @@ After installation, configure in this order:
 | PostgreSQL | 18 | Relational data storage |
 | Qdrant | latest | Vector database |
 | Containerd | v2 | Container runtime |
+
+---
+
+## 🚀 Secondary Development Features
+
+This project extends [Memoh](https://github.com/memohai/Memoh) with significant new features:
+
+### 🏢 WeCom (Enterprise WeChat) Adapter (New)
+
+- **WebSocket Real-time Connection**: Based on WeCom WebSocket API for low-latency messaging
+- **"Thinking..." Instant Reply**: Immediately sends "Thinking..." message upon receiving user input for better UX
+- **Streaming Message Output**: Supports streaming responses for real-time AI content generation
+- **Smart Rate Limiting**: Built-in 30 msg/min and 1000 msg/hour rate limiting to avoid WeCom API limits
+- **Rich Message Types**: Supports text, images, Markdown, cards, and more
+
+### 🐧 QQ Channel Adapter
+
+- **Official Bot API Support**: Based on QQ's official Bot API
+- **WebSocket Event Reception**: Real-time channel messages, member changes, and other events
+- **Rich Interaction Capabilities**: Message sending, emoji reactions, member management
+- **Robust Error Handling**: Includes reconnection mechanism, heartbeat keepalive, and recovery
+
+### 🔧 System Stability Enhancements
+
+- **DNS Resolution Fix**: Fixed DNS configuration issues in container environments using systemd-resolved upstream DNS
+- **Discord Adapter Fixes**: Fixed image message handling and streaming output issues
+- **Model List Incremental Rendering**: Optimized model list loading with incremental rendering support
 
 ---
 
