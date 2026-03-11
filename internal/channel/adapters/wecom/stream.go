@@ -205,8 +205,8 @@ func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, f
 		}
 
 		// For split content:
-		// - Intermediate chunks: finish=false (queued, wait for ACK)
-		// - Last chunk: use the original finish value (if true, this is the final message)
+		// - Intermediate chunks: finish=false (fast mode, no ACK wait)
+		// - Last chunk: use the original finish value (ack mode if finish=true)
 		chunkFinish := isLastChunk && finish
 
 		s.logger.Debug("sending chunk",
@@ -270,8 +270,9 @@ func (s *OutboundStream) sendChunk(ctx context.Context, content string, finish b
 		cmd = CmdSendMsg
 	}
 
-	// CRITICAL: SendStream now uses queue for ALL messages to ensure ordering
-	// This matches the behavior of the official WeCom AI Bot SDK
+	// CRITICAL: SendStream uses dual-mode queue:
+	// - finish=false: Fast mode, send without waiting for ACK (quick updates)
+	// - finish=true:  Ack mode, wait for ACK (ensure delivery of final message)
 	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
 		return fmt.Errorf("send chunk: %w", err)
 	}
@@ -330,8 +331,9 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 			slog.Bool("is_mentioned", isMentioned))
 	}
 
-	// CRITICAL: SendStream now uses queue for ALL messages to ensure ordering
-	// This matches the behavior of the official WeCom AI Bot SDK
+	// CRITICAL: SendStream uses dual-mode queue:
+	// - finish=false: Fast mode, send without waiting for ACK (quick updates)
+	// - finish=true:  Ack mode, wait for ACK (ensure delivery of final message)
 	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
 		return fmt.Errorf("send stream update: %w", err)
 	}

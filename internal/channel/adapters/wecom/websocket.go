@@ -583,10 +583,10 @@ func (c *WebSocketClient) SendReply(ctx context.Context, reqID string, body inte
 	})
 }
 
-// SendStream sends a stream message.
-// CRITICAL: All messages use the serial queue to ensure correct ordering and delivery.
-// According to WeCom AI Bot SDK, messages with the same req_id must be sent serially,
-// waiting for ACK before sending the next one.
+// SendStream sends a stream message using dual-mode queue:
+// - Intermediate updates (finish=false): Fast mode, send without waiting for ACK
+// - Final message (finish=true): Ack mode, wait for ACK before sending next
+// This ensures both speed and reliability while maintaining message order.
 // The cmd parameter specifies the command to use (CmdRespondMsg for replies, CmdSendMsg for proactive sends).
 func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody, cmd ...string) error {
 	// Determine which command to use (default to CmdRespondMsg for backward compatibility)
@@ -595,8 +595,9 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 		cmdToUse = cmd[0]
 	}
 
-	// CRITICAL: Always use queue for all messages to ensure ordering
-	// This matches the behavior of the official WeCom AI Bot SDK
+	// Determine mode based on finish flag
+	waitForAck := body.Stream.Finish // Only wait for ACK on final message
+
 	return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
 		frame := WebsocketMessage{
 			Cmd:     cmdToUse,
@@ -611,9 +612,10 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 		frame.Body = bodyBytes
 
 		item := &ReplyQueueItem{
-			Frame:   frame,
-			Resolve: resolve,
-			Reject:  reject,
+			Frame:      frame,
+			Resolve:    resolve,
+			Reject:     reject,
+			WaitForAck: waitForAck,
 		}
 
 		c.queueMu.Lock()
@@ -635,7 +637,8 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 		c.logger.Debug("stream message queued",
 			slog.String("req_id", reqID),
 			slog.Int("queue_len", len(queue)),
-			slog.Bool("finish", body.Stream.Finish))
+			slog.Bool("finish", body.Stream.Finish),
+			slog.Bool("wait_for_ack", waitForAck))
 
 		if len(queue) == 1 {
 			go c.processReplyQueue(reqID)
@@ -644,6 +647,9 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 }
 
 // processReplyQueue processes the reply queue for a specific req_id
+// Dual-mode processing:
+// - Fast mode (WaitForAck=false): Send and immediately continue to next message
+// - Ack mode (WaitForAck=true): Send and wait for ACK before continuing
 func (c *WebSocketClient) processReplyQueue(reqID string) {
 	c.queueMu.Lock()
 	queue, exists := c.replyQueues[reqID]
@@ -685,6 +691,26 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		return
 	}
 
+	// Dual-mode handling based on WaitForAck flag
+	if !item.WaitForAck {
+		// Fast mode: Send and immediately continue (for intermediate stream updates)
+		c.logger.Debug("reply sent (fast mode), continuing to next", slog.String("req_id", reqID))
+		item.Resolve(WebsocketMessage{}) // Resolve immediately without waiting for ACK
+
+		c.queueMu.Lock()
+		if queue, ok := c.replyQueues[reqID]; ok && len(queue) > 0 {
+			c.replyQueues[reqID] = queue[1:]
+			if len(c.replyQueues[reqID]) > 0 {
+				go c.processReplyQueue(reqID)
+			} else {
+				delete(c.replyQueues, reqID)
+			}
+		}
+		c.queueMu.Unlock()
+		return
+	}
+
+	// Ack mode: Wait for ACK before continuing (for final messages)
 	c.logger.Debug("reply sent, waiting for ack", slog.String("req_id", reqID))
 
 	// Set up timeout
