@@ -11,12 +11,15 @@ import (
 	"unicode"
 
 	"encoding/base64"
+	"os"
+	"path/filepath"
 
 	"github.com/Kxiandaoyan/Memoh-v2/internal/auth"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/route"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/conversation"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/conversation/flow"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/fileparse"
 	messagepkg "github.com/Kxiandaoyan/Memoh-v2/internal/message"
 )
 
@@ -59,9 +62,12 @@ type ChannelInboundProcessor struct {
 	groupDebouncer *messagepkg.GroupDebouncer
 	broadcaster    Broadcaster
 	routeLister    RouteLister
+	dataRoot       string // Data root path where files are actually saved (e.g., /opt/memoh/data)
 }
 
 // NewChannelInboundProcessor creates a processor with channel identity-based resolution.
+// dataRoot is the actual path where files are saved (e.g., /opt/memoh/data).
+// Bot containers access files via /shared which is mounted from {dataRoot}/shared.
 func NewChannelInboundProcessor(
 	log *slog.Logger,
 	registry *channel.Registry,
@@ -75,12 +81,16 @@ func NewChannelInboundProcessor(
 	bindService BindService,
 	jwtSecret string,
 	tokenTTL time.Duration,
+	dataRoot string,
 ) *ChannelInboundProcessor {
 	if log == nil {
 		log = slog.Default()
 	}
 	if tokenTTL <= 0 {
 		tokenTTL = 5 * time.Minute
+	}
+	if dataRoot == "" {
+		dataRoot = "/opt/memoh/data"
 	}
 	identityResolver := NewIdentityResolver(log, registry, channelIdentityService, memberService, policyService, preauthService, bindService, "", "")
 	return &ChannelInboundProcessor{
@@ -93,6 +103,7 @@ func NewChannelInboundProcessor(
 		tokenTTL:      tokenTTL,
 		identity:      identityResolver,
 		policyService: policyService,
+		dataRoot:      dataRoot,
 	}
 }
 
@@ -306,12 +317,19 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 	if sourceMessageID != "" {
 		replyRef.MessageID = sourceMessageID
 	}
+	// Build metadata for stream options, including req_id for WeCom and other channels
+	streamMetadata := map[string]any{
+		"route_id": resolved.RouteID,
+	}
+	if msg.Metadata != nil {
+		if v, ok := msg.Metadata["req_id"].(string); ok && v != "" {
+			streamMetadata["req_id"] = v
+		}
+	}
 	stream, err := sender.OpenStream(ctx, target, channel.StreamOptions{
 		Reply:           replyRef,
 		SourceMessageID: sourceMessageID,
-		Metadata: map[string]any{
-			"route_id": resolved.RouteID,
-		},
+		Metadata:        streamMetadata,
 	})
 	if err != nil {
 		if statusNotifier != nil {
@@ -337,6 +355,28 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 		return err
 	}
 
+	// Build input attachments and extract file content for supported types
+	if p.logger != nil && len(msg.Message.Attachments) > 0 {
+		p.logger.Info("processing message attachments", slog.Int("count", len(msg.Message.Attachments)))
+		for i, att := range msg.Message.Attachments {
+			p.logger.Info("attachment details", slog.Int("index", i), slog.String("type", string(att.Type)), slog.String("name", att.Name), slog.String("mime", att.Mime), slog.Int("dataSize", len(att.Data)))
+		}
+	}
+	inputAttachments, fileContext := buildInputAttachments(msg.Message.Attachments, p.dataRoot, p.logger)
+	if fileContext != "" {
+		if p.logger != nil {
+			origText := text
+			if len(origText) > 100 {
+				origText = origText[:100] + "..."
+			}
+			p.logger.Info("adding file context to query", slog.Int("contextLength", len(fileContext)), slog.String("originalText", origText))
+		}
+		text = text + fileContext
+		if p.logger != nil {
+			p.logger.Info("query with file context", slog.Int("totalLength", len(text)))
+		}
+	}
+
 	chunkCh, streamErrCh := p.runner.StreamChat(ctx, conversation.ChatRequest{
 		BotID:                   identity.BotID,
 		ChatID:                  activeChatID,
@@ -353,12 +393,12 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 		CurrentChannel:          msg.Channel.String(),
 		Channels:                []string{msg.Channel.String()},
 		UserMessagePersisted:    userMessagePersisted,
-		InputAttachments:        buildInputAttachments(msg.Message.Attachments),
+		InputAttachments:        inputAttachments,
 	})
 
 	var (
-		finalMessages []conversation.ModelMessage
-		streamErr     error
+		finalMessages  []conversation.ModelMessage
+		streamErr      error
 		collectedUsage *gatewayUsage
 	)
 	for chunkCh != nil || streamErrCh != nil {
@@ -1280,12 +1320,19 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 	if sourceMessageID != "" {
 		replyRef.MessageID = sourceMessageID
 	}
+	// Build metadata for stream options, including req_id for WeCom and other channels
+	streamMetadata := map[string]any{
+		"route_id": resolved.RouteID,
+	}
+	if msg.Metadata != nil {
+		if v, ok := msg.Metadata["req_id"].(string); ok && v != "" {
+			streamMetadata["req_id"] = v
+		}
+	}
 	stream, err := sender.OpenStream(ctx, target, channel.StreamOptions{
 		Reply:           replyRef,
 		SourceMessageID: sourceMessageID,
-		Metadata: map[string]any{
-			"route_id": resolved.RouteID,
-		},
+		Metadata:        streamMetadata,
 	})
 	if err != nil {
 		return err
@@ -1297,6 +1344,28 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 		Status: channel.StreamStatusStarted,
 	}); err != nil {
 		return err
+	}
+
+	// Build input attachments and extract file content for supported types
+	if p.logger != nil && len(msg.Message.Attachments) > 0 {
+		p.logger.Info("processing message attachments", slog.Int("count", len(msg.Message.Attachments)))
+		for i, att := range msg.Message.Attachments {
+			p.logger.Info("attachment details", slog.Int("index", i), slog.String("type", string(att.Type)), slog.String("name", att.Name), slog.String("mime", att.Mime), slog.Int("dataSize", len(att.Data)))
+		}
+	}
+	inputAttachments, fileContext := buildInputAttachments(msg.Message.Attachments, p.dataRoot, p.logger)
+	if fileContext != "" {
+		if p.logger != nil {
+			origText := text
+			if len(origText) > 100 {
+				origText = origText[:100] + "..."
+			}
+			p.logger.Info("adding file context to query", slog.Int("contextLength", len(fileContext)), slog.String("originalText", origText))
+		}
+		text = text + fileContext
+		if p.logger != nil {
+			p.logger.Info("query with file context", slog.Int("totalLength", len(text)))
+		}
 	}
 
 	chunkCh, streamErrCh := p.runner.StreamChat(ctx, conversation.ChatRequest{
@@ -1315,7 +1384,7 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 		CurrentChannel:          msg.Channel.String(),
 		Channels:                []string{msg.Channel.String()},
 		UserMessagePersisted:    userMessagePersisted,
-		InputAttachments:        buildInputAttachments(msg.Message.Attachments),
+		InputAttachments:        inputAttachments,
 	})
 
 	var (
@@ -1373,25 +1442,334 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 
 // buildInputAttachments converts channel attachments with binary data into
 // conversation.InputAttachment entries for the LLM gateway.
-func buildInputAttachments(attachments []channel.Attachment) []conversation.InputAttachment {
+// It also extracts text content from supported file types (PDF, DOCX, XLSX, etc.)
+// and returns it as fileContext to be appended to the query.
+// Files are saved to {dataRoot}/shared/attachments/ which is mounted at /shared in bot containers.
+// dataRoot is the actual path where files are saved (e.g., /opt/memoh/data).
+func buildInputAttachments(attachments []channel.Attachment, dataRoot string, logger *slog.Logger) ([]conversation.InputAttachment, string) {
 	if len(attachments) == 0 {
-		return nil
+		return nil, ""
 	}
 	var out []conversation.InputAttachment
+	var fileContext strings.Builder
+	hasExtractableFiles := false
+
+	if logger != nil {
+		logger.Info("building input attachments", slog.Int("count", len(attachments)))
+	}
+
 	for _, att := range attachments {
-		if len(att.Data) == 0 {
-			continue
+		switch att.Type {
+		case channel.AttachmentImage:
+			if len(att.Data) > 0 {
+				out = append(out, conversation.InputAttachment{
+					Type:   "image",
+					Base64: base64.StdEncoding.EncodeToString(att.Data),
+				})
+			}
+		case channel.AttachmentFile:
+			// For files, save to data directory and pass path to agent
+			if len(att.Data) > 0 {
+				if logger != nil {
+					logger.Info("processing file attachment", slog.String("name", att.Name), slog.String("mime", att.Mime))
+				}
+
+				// Save file to dataRoot/shared/attachments/ directory for bot container access
+				// Bot containers mount this as /shared/attachments/
+				savePath, err := saveAttachmentToDataDir(att, dataRoot, logger)
+				if err != nil {
+					if logger != nil {
+						logger.Error("failed to save attachment", slog.String("name", att.Name), slog.String("error", err.Error()))
+					}
+					// Still add attachment with original name if save fails
+					out = append(out, conversation.InputAttachment{
+						Type:   "file",
+						Base64: base64.StdEncoding.EncodeToString(att.Data),
+						Path:   att.Name,
+					})
+				} else {
+					// Try to extract text from saved file (using actual path)
+					extractedText := tryExtractFileContent(savePath, att.Mime, att.Name, logger)
+
+					// Bot-visible path: /shared/attachments/filename.xls
+					// The shared directory is mounted at /shared in bot containers
+					botVisiblePath := "/shared/attachments/" + filepath.Base(savePath)
+
+					// Always include file info in context, even if extraction fails
+					if !hasExtractableFiles {
+						fileContext.WriteString("\n\n[Attached files]\n")
+						hasExtractableFiles = true
+					}
+
+					if extractedText != "" {
+						// Successfully extracted content
+						fileContext.WriteString(fmt.Sprintf("\n### File: %s\nPath: %s\nSize: %d bytes\n\n```\n%s\n```\n",
+							att.Name, botVisiblePath, len(att.Data), extractedText))
+					} else {
+						// Extraction failed or file type not supported for extraction
+						// Include file metadata and explicit skill usage instruction
+						ext := strings.ToLower(filepath.Ext(att.Name))
+						skillHint := ""
+						switch ext {
+						case ".xls", ".xlsx", ".xlsm":
+							skillHint = "\n⚠️ ACTION REQUIRED: Use the 'xlsx' skill IMMEDIATELY to read this Excel file. Use use_skill with skillName='xlsx'. DO NOT use rag-documents skill for Excel files - it requires external RAG service."
+						case ".pdf":
+							skillHint = "\n⚠️ ACTION REQUIRED: Use an appropriate PDF skill if available, or ask the user what they need from this PDF."
+						case ".docx", ".doc":
+							skillHint = "\n⚠️ ACTION REQUIRED: Use the 'docx' skill if available to read this Word document."
+						case ".pptx", ".ppt":
+							skillHint = "\n⚠️ ACTION REQUIRED: Use the 'pptx' skill if available to read this PowerPoint file."
+						default:
+							skillHint = "\n⚠️ ACTION REQUIRED: This file type may require using a skill to analyze."
+						}
+						fileContext.WriteString(fmt.Sprintf("\n### File: %s\nPath: %s\nSize: %d bytes\nType: %s%s\n",
+							att.Name, botVisiblePath, len(att.Data), att.Mime, skillHint))
+					}
+
+					// Add attachment with bot-visible file path
+					out = append(out, conversation.InputAttachment{
+						Type:   "file",
+						Base64: base64.StdEncoding.EncodeToString(att.Data),
+						Path:   botVisiblePath,
+					})
+				}
+			}
 		}
-		if att.Type != channel.AttachmentImage {
-			continue // only images for now
-		}
-		out = append(out, conversation.InputAttachment{
-			Type:   "image",
-			Base64: base64.StdEncoding.EncodeToString(att.Data),
-		})
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, ""
 	}
-	return out
+	if logger != nil {
+		logger.Info("buildInputAttachments completed", slog.Int("attachmentCount", len(out)), slog.Bool("hasExtractableFiles", hasExtractableFiles), slog.Int("contextLength", fileContext.Len()))
+		if hasExtractableFiles {
+			preview := fileContext.String()
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			logger.Info("extracted file context preview", slog.String("contextPreview", preview))
+		}
+	}
+	return out, fileContext.String()
+}
+
+// saveAttachmentToDataDir saves the attachment to {dataRoot}/shared/attachments/ directory
+// where bot containers can access it via /shared/attachments/. Returns the full path to the saved file.
+// dataRoot should be the path configured in mcp.data_root (e.g., /opt/memoh/data).
+func saveAttachmentToDataDir(att channel.Attachment, dataRoot string, logger *slog.Logger) (string, error) {
+	// Use the configured data root path
+	if dataRoot == "" {
+		dataRoot = "/opt/memoh/data"
+	}
+	// Save to shared directory so all bot containers can access
+	// The shared directory is mounted to /shared in bot containers
+	attachmentsDir := filepath.Join(dataRoot, "shared", "attachments")
+	if err := os.MkdirAll(attachmentsDir, 0755); err != nil {
+		return "", fmt.Errorf("create attachments directory: %w", err)
+	}
+
+	// Generate a safe filename
+	safeName := sanitizeFileName(att.Name)
+	if safeName == "" {
+		safeName = "unnamed_attachment"
+	}
+
+	// Add timestamp to avoid conflicts
+	timestamp := time.Now().UnixNano()
+	ext := filepath.Ext(safeName)
+	baseName := strings.TrimSuffix(safeName, ext)
+	fileName := fmt.Sprintf("%s_%d%s", baseName, timestamp, ext)
+	filePath := filepath.Join(attachmentsDir, fileName)
+
+	// Write file data
+	if err := os.WriteFile(filePath, att.Data, 0644); err != nil {
+		return "", fmt.Errorf("write attachment file: %w", err)
+	}
+
+	if logger != nil {
+		logger.Info("saved attachment to data directory", slog.String("originalName", att.Name), slog.String("savedPath", filePath), slog.Int("size", len(att.Data)))
+	}
+
+	return filePath, nil
+}
+
+// sanitizeFileName removes or replaces unsafe characters from filename
+func sanitizeFileName(name string) string {
+	// Remove path separators and other unsafe characters
+	unsafe := []string{"/", "\\", "..", "<", ">", ":", "\"", "|", "?", "*"}
+	result := name
+	for _, c := range unsafe {
+		result = strings.ReplaceAll(result, c, "_")
+	}
+	return result
+}
+
+// tryExtractFileContent attempts to extract text content from a saved file.
+// It uses fileparse.ExtractText for supported types.
+func tryExtractFileContent(filePath string, mimeType string, originalName string, logger *slog.Logger) string {
+	// Check if this is a supported file type based on MIME type or extension
+	mime := strings.ToLower(strings.TrimSpace(mimeType))
+	ext := strings.ToLower(filepath.Ext(originalName))
+
+	if logger != nil {
+		logger.Info("trying to extract file content", slog.String("name", originalName), slog.String("path", filePath), slog.String("mime", mime), slog.String("ext", ext))
+	}
+
+	// If no extension, try to detect from file content (magic numbers)
+	if ext == "" {
+		data, err := os.ReadFile(filePath)
+		if err == nil && len(data) > 0 {
+			detectedExt := detectFileTypeByContent(data)
+			if detectedExt != "" {
+				ext = detectedExt
+				if logger != nil {
+					logger.Info("detected file type by content", slog.String("name", originalName), slog.String("detectedExt", detectedExt))
+				}
+			}
+		}
+	}
+
+	// Check if it's a supported type (rely more on extension since WeCom doesn't set MIME)
+	isSupported := false
+	switch {
+	case mime == "application/pdf" || ext == ".pdf":
+		isSupported = true
+		if mime == "" || mime == "application/octet-stream" {
+			mime = "application/pdf"
+		}
+	case mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || ext == ".docx":
+		isSupported = true
+		if mime == "" || mime == "application/octet-stream" {
+			mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		}
+	case mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+		mime == "application/vnd.ms-excel" || ext == ".xlsx" || ext == ".xls":
+		isSupported = true
+		if mime == "" || mime == "application/octet-stream" {
+			mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+		}
+	case mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+		mime == "application/vnd.ms-powerpoint" || ext == ".pptx" || ext == ".ppt":
+		isSupported = true
+		if mime == "" || mime == "application/octet-stream" {
+			mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+		}
+	case mime == "text/plain" || ext == ".txt" || ext == ".md" || ext == ".json" || ext == ".csv":
+		isSupported = true
+		if mime == "" || mime == "application/octet-stream" {
+			mime = "text/plain"
+		}
+	}
+
+	if logger != nil {
+		logger.Info("file type check result", slog.String("name", originalName), slog.String("mime", mime), slog.String("ext", ext), slog.Bool("isSupported", isSupported))
+	}
+
+	if !isSupported {
+		if logger != nil {
+			logger.Info("file type not supported for extraction", slog.String("name", originalName), slog.String("mime", mime), slog.String("ext", ext))
+		}
+		return ""
+	}
+
+	// Extract text using fileparse from the saved file
+	if logger != nil {
+		logger.Info("calling fileparse.ExtractText", slog.String("name", originalName), slog.String("mime", mime), slog.String("path", filePath))
+	}
+	text, err := fileparse.ExtractText(filePath, mime)
+	if err != nil {
+		if logger != nil {
+			logger.Error("failed to extract text", slog.String("name", originalName), slog.String("mime", mime), slog.String("error", err.Error()))
+		}
+		// Return empty string to let the skill handle the file
+		// The file is still passed as an attachment to the agent
+		return ""
+	}
+	if logger != nil {
+		preview := text
+		if len(preview) > 100 {
+			preview = preview[:100] + "..."
+		}
+		logger.Info("successfully extracted text", slog.String("name", originalName), slog.String("mime", mime), slog.Int("textLength", len(text)), slog.String("textPreview", preview))
+	}
+	return text
+}
+
+// detectFileTypeByContent detects file type by examining the file's magic numbers (first few bytes).
+// Returns the file extension including the dot (e.g., ".pdf") or empty string if unknown.
+func detectFileTypeByContent(data []byte) string {
+	if len(data) < 4 {
+		return ""
+	}
+
+	// Check for PDF: starts with "%PDF"
+	if len(data) >= 4 && string(data[0:4]) == "%PDF" {
+		return ".pdf"
+	}
+
+	// Check for ZIP (DOCX, XLSX, PPTX are all ZIP-based): starts with "PK\x03\x04" or "PK\x05\x06"
+	if len(data) >= 4 && data[0] == 0x50 && data[1] == 0x4B {
+		// Check for Office Open XML formats by examining the ZIP content
+		// DOCX, XLSX, PPTX all start with PK and contain specific file entries
+		// For simplicity, we'll try to distinguish by looking for characteristic strings
+		dataStr := string(data)
+		// Check for DOCX (contains word/ directory)
+		if containsAny(dataStr, []string{"word/document.xml", "word/_rels"}) {
+			return ".docx"
+		}
+		// Check for XLSX (contains xl/ directory)
+		if containsAny(dataStr, []string{"xl/workbook.xml", "xl/_rels"}) {
+			return ".xlsx"
+		}
+		// Check for PPTX (contains ppt/ directory)
+		if containsAny(dataStr, []string{"ppt/presentation.xml", "ppt/_rels"}) {
+			return ".pptx"
+		}
+		// Generic ZIP-based Office file
+		return ".zip"
+	}
+
+	// Check for legacy Excel 97-2003 (.xls) - OLE compound document format
+	// Signature: D0 CF 11 E0 A1 B1 1A E1
+	if len(data) >= 8 &&
+		data[0] == 0xD0 && data[1] == 0xCF &&
+		data[2] == 0x11 && data[3] == 0xE0 &&
+		data[4] == 0xA1 && data[5] == 0xB1 &&
+		data[6] == 0x1A && data[7] == 0xE1 {
+		return ".xls"
+	}
+
+	// Check for plain text (printable ASCII characters)
+	isText := true
+	checkLen := min(len(data), 512)
+	for i := 0; i < checkLen; i++ {
+		b := data[i]
+		// Allow printable ASCII, tabs, newlines, carriage returns
+		if b < 32 && b != 9 && b != 10 && b != 13 {
+			isText = false
+			break
+		}
+	}
+	if isText {
+		return ".txt"
+	}
+
+	return ""
+}
+
+// containsAny checks if any of the substrings exist in the given string
+func containsAny(s string, substrs []string) bool {
+	for _, substr := range substrs {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

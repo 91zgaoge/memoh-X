@@ -7,7 +7,7 @@ interface SkillToolParams {
 
 export const getSkillTools = ({ useSkill }: SkillToolParams) => {
   const useSkillTool = tool({
-    description: 'Use a skill if you think it is relevant to the current task. Returns the full skill content so you can follow its instructions.',
+    description: 'Use a skill if you think it is relevant to the current task. Returns the full skill content so you can follow its instructions. IMPORTANT: When you receive file attachments (Excel .xls/.xlsx, PDF, Word .docx, images, etc.) that you cannot directly read as plain text, IMMEDIATELY use the appropriate skill (e.g., use_skill with skillName="xlsx" for Excel files) rather than trying to read the file directly with the read tool.',
     inputSchema: z.object({
       skillName: z.string().describe('The name of the skill to use'),
       reason: z.string().describe('The reason why you think this skill is relevant to the current task'),

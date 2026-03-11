@@ -42,6 +42,8 @@ func (h *ProvidersHandler) Register(e *echo.Echo) {
 	group.PUT("/:id", h.Update)
 	group.DELETE("/:id", h.Delete)
 	group.GET("/count", h.Count)
+	group.POST("/:id/test", h.Test)
+	group.POST("/:id/import-models", h.ImportModels)
 }
 
 // Create godoc
@@ -304,4 +306,70 @@ func (h *ProvidersHandler) Count(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, providers.CountResponse{Count: count})
+}
+
+// Test godoc
+// @Summary Test provider connectivity
+// @Description Test if the provider's base URL is reachable
+// @Tags providers
+// @Accept json
+// @Produce json
+// @Param id path string true "Provider ID (UUID)"
+// @Success 200 {object} providers.TestResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /providers/{id}/test [post]
+func (h *ProvidersHandler) Test(c echo.Context) error {
+	id := c.Param("id")
+	if id == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "id is required")
+	}
+
+	resp, err := h.service.Test(c.Request().Context(), id)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid") {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ImportModels godoc
+// @Summary Import models from provider
+// @Description Fetch models from provider's /v1/models endpoint and import them
+// @Tags providers
+// @Accept json
+// @Produce json
+// @Param id path string true "Provider ID (UUID)"
+// @Param request body providers.ImportModelsRequest true "Import configuration"
+// @Success 200 {object} providers.ImportModelsResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /providers/{id}/import-models [post]
+func (h *ProvidersHandler) ImportModels(c echo.Context) error {
+	if err := h.requireAdmin(c); err != nil {
+		return err
+	}
+
+	id := c.Param("id")
+	if id == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "id is required")
+	}
+
+	var req providers.ImportModelsRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+
+	resp, err := h.service.ImportModels(c.Request().Context(), id, req)
+	if err != nil {
+		h.logger.Error("import models failed", slog.String("id", id), slog.Any("error", err))
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }

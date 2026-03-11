@@ -96,7 +96,13 @@ func (c *Config) ShouldTriggerGroupResponse(content string) bool {
 	}
 
 	// 检查是否包含 @ 符号（用于群聊中@机器人）
+	// 企业微信可能使用不同的格式，如 <@userid> 或 @用户名
 	if strings.Contains(content, "@") {
+		return true
+	}
+
+	// 检查是否包含 < 和 > 组合（可能是富文本@格式）
+	if strings.Contains(content, "<") && strings.Contains(content, ">") {
 		return true
 	}
 
@@ -105,9 +111,32 @@ func (c *Config) ShouldTriggerGroupResponse(content string) bool {
 
 // ExtractGroupMessageContent removes @mention markers from content
 func (c *Config) ExtractGroupMessageContent(content string) string {
+	originalContent := content
 	// Remove @_user_ prefix if present
 	content = strings.TrimPrefix(content, "@_user_")
-	return strings.TrimSpace(content)
+
+	// Handle <@userid> format (Slack/WeCom style)
+	// Find and remove patterns like <@USERID> or <@USERID|nickname>
+	if idx := strings.Index(content, "<@"); idx != -1 {
+		endIdx := strings.Index(content[idx:], ">")
+		if endIdx != -1 {
+			// Remove the entire <@...> part
+			before := content[:idx]
+			after := content[idx+endIdx+1:]
+			content = before + after
+		}
+	}
+
+	// Handle @mention format
+	content = strings.ReplaceAll(content, "@mention", "")
+
+	// If content is empty after removing mentions, return original
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return strings.TrimSpace(originalContent)
+	}
+
+	return trimmed
 }
 
 // GetWelcomeMessage returns the welcome message for enter_chat event

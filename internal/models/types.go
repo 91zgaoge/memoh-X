@@ -126,3 +126,20 @@ type DeleteResponse struct {
 type CountResponse struct {
 	Count int64 `json:"count"`
 }
+
+// TestStatus represents the result of a model connectivity test
+type TestStatus string
+
+const (
+	TestStatusOK         TestStatus = "ok"
+	TestStatusAuthError  TestStatus = "auth_error"
+	TestStatusError      TestStatus = "error"
+)
+
+// TestResponse represents the response from a model test
+type TestResponse struct {
+	Status    TestStatus `json:"status"`
+	Reachable bool       `json:"reachable"`
+	LatencyMs int64      `json:"latency_ms,omitempty"`
+	Message   string     `json:"message,omitempty"`
+}

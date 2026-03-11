@@ -193,7 +193,11 @@
     "fallbackModel": "备用模型",
     "fallbackModelPlaceholder": "选择备用模型（模型故障时自动切换）",
     "fallbackModelHint": "主模型不可用时自动切换到此模型",
-    "noFallback": "无备用模型"
+    "noFallback": "无备用模型",
+    "testModel": "测试模型",
+    "importFromProvider": "从服务商获取模型",
+    "importedCount": "成功导入 {count} 个模型",
+    "moreErrors": "还有 {count} 个错误..."
   },
   "provider": {
     "add": "添加服务商",
@@ -207,7 +211,11 @@
     "deleteConfirm": "确定要删除这个服务商吗？",
     "saveChanges": "保存修改",
     "emptyTitle": "暂无服务商",
-    "emptyDescription": "请先添加模型服务商，才能配置模型"
+    "emptyDescription": "请先添加模型服务商，才能配置模型",
+    "testConnection": "测试连接",
+    "reachable": "连接成功",
+    "unreachable": "连接失败",
+    "testFailed": "测试失败"
   },
   "searchProvider": {
     "title": "搜索提供方",

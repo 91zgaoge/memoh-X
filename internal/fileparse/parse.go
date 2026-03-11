@@ -24,17 +24,20 @@ func ExtractText(filePath string, mimeType string) (string, error) {
 	)
 
 	switch {
-	case mime == "application/pdf":
+	case mime == "application/pdf" || ext == ".pdf":
 		text, err = extractPDF(filePath)
 	case mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || ext == ".docx":
 		text, err = extractDOCX(filePath)
 	case mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
 		mime == "application/vnd.ms-excel" || ext == ".xlsx" || ext == ".xls":
 		text, err = extractXLSX(filePath)
+	case mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+		mime == "application/vnd.ms-powerpoint" || ext == ".pptx" || ext == ".ppt":
+		text, err = extractPPTX(filePath)
 	case isPlainText(mime, ext):
 		text, err = extractPlainText(filePath)
 	default:
-		return "", fmt.Errorf("unsupported file type: %s (%s)", mime, ext)
+		return "", fmt.Errorf("unsupported file type: mime=%s ext=%s", mime, ext)
 	}
 
 	if err != nil {

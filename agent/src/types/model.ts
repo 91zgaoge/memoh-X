@@ -45,6 +45,7 @@ export const SYSTEM_SAFE_PROVIDERS = new Set<string>([
   'openai', 'anthropic', 'google', 'azure', 'bedrock', 'mistral', 'xai',
   'deepseek', 'groq', 'openrouter', 'together', 'fireworks', 'perplexity',
   'zhipu', 'siliconflow', 'nvidia', 'bailing', 'xiaomi', 'longcat', 'modelscope',
+  'ollama', 'openai-compat', 'dashscope',
 ])
 
 export interface ModelConfig {

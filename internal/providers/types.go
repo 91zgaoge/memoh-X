@@ -93,7 +93,20 @@ type TestRequest struct {
 
 // TestResponse represents the result of testing a provider
 type TestResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
-	Latency int64  `json:"latency_ms,omitempty"` // latency in milliseconds
+	Reachable bool   `json:"reachable"`
+	Message   string `json:"message,omitempty"`
+	LatencyMs int64  `json:"latency_ms,omitempty"` // latency in milliseconds
+}
+
+// ImportModelsRequest represents a request to import models from provider
+type ImportModelsRequest struct {
+	Type      string `json:"type"`       // "chat" or "embedding"
+	ClientType string `json:"client_type"` // optional client type override
+}
+
+// ImportModelsResponse represents the response from importing models
+type ImportModelsResponse struct {
+	Imported int      `json:"imported"`
+	Models   []string `json:"models"`
+	Errors   []string `json:"errors,omitempty"`
 }

@@ -146,6 +146,7 @@ type MixedMsgItem struct {
 	MsgType string        `json:"msgtype"`
 	Text    *TextContent  `json:"text,omitempty"`
 	Image   *ImageContent `json:"image,omitempty"`
+	File    *FileContent  `json:"file,omitempty"`
 }
 
 // QuoteContent 表示引用消息内容
@@ -163,6 +164,12 @@ type EventContent struct {
 	EventType string `json:"eventtype"`
 	EventKey  string `json:"event_key,omitempty"`
 	TaskID    string `json:"task_id,omitempty"`
+}
+
+// DisconnectedEventData 表示连接断开事件数据
+// 当有新连接建立时，系统会给旧连接发送该事件
+type DisconnectedEventData struct {
+	EventType string `json:"eventtype"`
 }
 
 // ========== 回复消息体 ==========
@@ -272,6 +279,35 @@ type TemplateCardJumpItem struct {
 type TemplateCardAction struct {
 	Type int    `json:"type"`
 	URL  string `json:"url,omitempty"`
+}
+
+// ========== 主动发送消息体 ==========
+
+// ChatType 会话类型，用于主动发送消息时指定会话类型
+const (
+	ChatTypeAuto   = 0 // 兼容单聊/群聊类型，优先按照群聊会话类型去发送消息（默认）
+	ChatTypeSingle = 1 // 单聊（用户 userid）
+	ChatTypeGroup  = 2 // 群聊
+)
+
+// SendMarkdownMsgBody 主动发送 Markdown 消息体
+type SendMarkdownMsgBody struct {
+	MsgType  string          `json:"msgtype"`
+	Markdown MarkdownContent `json:"markdown"`
+	// ChatType 会话类型，用于指定 chatid 的解析方式
+	// 1：单聊（用户 userid）；2：群聊；0 或不填：兼容单聊/群聊类型，优先按照群聊会话类型去发送消息
+	// 建议开发者设置具体的单聊或者群聊来使用
+	ChatType int `json:"chat_type,omitempty"`
+}
+
+// SendTemplateCardMsgBody 主动发送模板卡片消息体
+type SendTemplateCardMsgBody struct {
+	MsgType      string       `json:"msgtype"`
+	TemplateCard TemplateCard `json:"template_card"`
+	// ChatType 会话类型，用于指定 chatid 的解析方式
+	// 1：单聊（用户 userid）；2：群聊；0 或不填：兼容单聊/群聊类型，优先按照群聊会话类型去发送消息
+	// 建议开发者设置具体的单聊或者群聊来使用
+	ChatType int `json:"chat_type,omitempty"`
 }
 
 // ========== 辅助结构 ==========

@@ -397,6 +397,7 @@ export const createAgent = (
   }
 
   const generateUserPrompt = (input: AgentInput) => {
+    console.log('[Agent generateUserPrompt] Input:', { query: input.query?.slice(0, 200), attachmentCount: input.attachments?.length, attachments: input.attachments?.map((a: any) => ({ type: a.type, path: (a as any).path, base64Length: (a as any).base64?.length })) })
     const images = input.attachments.filter(
       (attachment) => attachment.type === 'image',
     )
@@ -426,36 +427,57 @@ export const createAgent = (
   const sanitizeMessages = (messages: ModelMessage[]): ModelMessage[] => {
     const supportedRoles = new Set(['user', 'assistant', 'system', 'tool'])
     const supportedTypes = new Set(['text', 'image', 'file', 'tool-call', 'tool-result', 'reasoning'])
-    return messages
-      .filter((msg) => {
-        // Drop messages with unsupported roles (e.g. item_reference from Responses API).
-        if (!msg || typeof msg !== 'object') return false
-        const role = (msg as Record<string, unknown>).role
-        if (typeof role !== 'string' || !supportedRoles.has(role)) return false
-        // Drop messages that have a non-standard "type" field at the top level.
-        const msgType = (msg as Record<string, unknown>).type
-        if (typeof msgType === 'string' && msgType !== '' && !supportedTypes.has(msgType)) return false
-        return true
-      })
-      .map((msg) => {
-        const role = (msg as Record<string, unknown>).role as string
-        if (role === 'system' && !SYSTEM_SAFE_PROVIDERS.has(modelConfig.clientType)) {
-          return { ...msg, role: 'user' } as ModelMessage
-        }
-        if (!Array.isArray(msg.content)) return msg
+
+    // First filter valid messages
+    const filtered = messages.filter((msg) => {
+      // Drop messages with unsupported roles (e.g. item_reference from Responses API).
+      if (!msg || typeof msg !== 'object') return false
+      const role = (msg as Record<string, unknown>).role
+      if (typeof role !== 'string' || !supportedRoles.has(role)) return false
+      // Drop messages that have a non-standard "type" field at the top level.
+      const msgType = (msg as Record<string, unknown>).type
+      if (typeof msgType === 'string' && msgType !== '' && !supportedTypes.has(msgType)) return false
+      return true
+    })
+
+    // Separate system messages from other messages
+    const systemMsgs: ModelMessage[] = []
+    const otherMsgs: ModelMessage[] = []
+
+    for (const msg of filtered) {
+      const role = (msg as Record<string, unknown>).role as string
+      // Transform message content
+      let transformedMsg = msg
+      if (role === 'system' && !SYSTEM_SAFE_PROVIDERS.has(modelConfig.clientType)) {
+        transformedMsg = { ...msg, role: 'user' } as ModelMessage
+      }
+      if (Array.isArray(msg.content)) {
         const original = msg.content as Array<Record<string, unknown>>
-        const filtered = original.filter((part) => {
+        const filteredContent = original.filter((part) => {
           if (!part || typeof part !== 'object') return true
           const t = part.type
           if (!t || typeof t !== 'string') return true
           return supportedTypes.has(t)
         })
-        if (filtered.length === original.length) return msg
-        if (filtered.length === 0) {
-          return { ...msg, content: [{ type: 'text', text: '' }] } as ModelMessage
+        if (filteredContent.length !== original.length) {
+          if (filteredContent.length === 0) {
+            transformedMsg = { ...msg, content: [{ type: 'text', text: '' }] } as ModelMessage
+          } else {
+            transformedMsg = { ...msg, content: filteredContent } as ModelMessage
+          }
         }
-        return { ...msg, content: filtered } as ModelMessage
-      })
+      }
+
+      // Separate system messages (must be at beginning for Jinja template processing)
+      if (role === 'system') {
+        systemMsgs.push(transformedMsg)
+      } else {
+        otherMsgs.push(transformedMsg)
+      }
+    }
+
+    // System messages must be at the beginning (required by Jinja template processing)
+    return [...systemMsgs, ...otherMsgs]
   }
 
   // Normalize AI SDK v6 usage fields to the legacy names expected by the
@@ -475,19 +497,77 @@ export const createAgent = (
     }
   }
 
+  // Detect file types from attachments and auto-enable relevant skills
+  const autoEnableSkillsFromAttachments = async (attachments: AgentAttachment[]) => {
+    const files = attachments.filter((a): a is ContainerFileAttachment => a.type === 'file')
+    for (const file of files) {
+      const lowerPath = file.path?.toLowerCase() || ''
+      let skillName: string | null = null
+      if (lowerPath.endsWith('.xls') || lowerPath.endsWith('.xlsx') || lowerPath.endsWith('.xlsm')) {
+        skillName = 'xlsx'
+      } else if (lowerPath.endsWith('.docx') || lowerPath.endsWith('.doc')) {
+        skillName = 'docx'
+      } else if (lowerPath.endsWith('.pptx') || lowerPath.endsWith('.ppt')) {
+        skillName = 'pptx'
+      } else if (lowerPath.endsWith('.pdf')) {
+        skillName = 'pdf'
+      }
+
+      if (skillName && !enabledSkills.some((s) => s.name === skillName)) {
+        // Try to find skill in available skills list first
+        const agentSkill = skills.find((s) => s.name === skillName)
+        if (agentSkill) {
+          // Use pre-loaded skill
+          let content = agentSkill.content
+          if (!content) {
+            content = await readSkillContent(skillName)
+          }
+          if (content) {
+            enabledSkills.push({ ...agentSkill, content })
+            console.log(`[${identity.botId}] Auto-enabled skill: ${skillName}`)
+          }
+        } else {
+          // Skill not in available list - try to load directly from container
+          const content = await readSkillContent(skillName)
+          if (content) {
+            enabledSkills.push({
+              name: skillName,
+              description: `Auto-loaded ${skillName} skill for file processing`,
+              content,
+            })
+            console.log(`[${identity.botId}] Auto-loaded skill from container: ${skillName} (content length: ${content.length})`)
+          } else {
+            console.warn(`[${identity.botId}] Failed to load skill content for: ${skillName}`)
+          }
+        }
+      }
+    }
+  }
+
   const ask = async (input: AgentInput) => {
     const userPrompt = generateUserPrompt(input)
-    const messages = [...sanitizeMessages(input.messages), userPrompt]
     await Promise.all(input.skills.map((skill) => enableSkill(skill)))
+    // Auto-enable skills based on file attachments
+    await autoEnableSkillsFromAttachments(input.attachments)
     const sessionId = `ask:${identity.botId}:${Date.now()}`
     const { tools, toolNames, close } = await getAgentTools(sessionId)
+    console.log(`[${identity.botId}] Enabled skills before generating system prompt:`, enabledSkills.map(s => ({ name: s.name, contentLength: s.content?.length || 0 })))
     const systemPrompt = await generateSystemPrompt('full', toolNames)
+    console.log(`[${identity.botId}] System prompt length: ${systemPrompt.length}, includes xlsx: ${systemPrompt.includes('xlsx')}`)
+    // Build messages with system message at the beginning (required by Jinja template processing)
+    // SystemModelMessage requires content to be a string, not an array
+    // Remove any existing system messages from input to avoid duplicates
+    const nonSystemMessages = sanitizeMessages(input.messages).filter((msg) => (msg as Record<string, unknown>).role !== 'system')
+    const systemMessage = {
+      role: 'system' as const,
+      content: systemPrompt,
+    }
+    const messages = [systemMessage, ...nonSystemMessages, userPrompt]
     const { response, reasoning, text, usage } = await withRetry(
       () =>
         generateText({
           model,
           messages,
-          system: systemPrompt,
           stopWhen: stepCountIs(Infinity),
           onFinish: async () => {
             await close()
@@ -535,7 +615,6 @@ export const createAgent = (
       readContainerFile(`${rolePath}/soul.md`).catch(() => ''),
       readContainerFile(`${rolePath}/task.md`).catch(() => ''),
     ])
-    const messages = [...sanitizeMessages(params.messages), userPrompt]
     const sessionId = `subagent:${identity.botId}:${params.name}:${Date.now()}`
     const { tools, toolNames, close } = await getAgentTools(sessionId)
     const toolContext = generateToolContext(toolNames)
@@ -553,12 +632,21 @@ export const createAgent = (
       })
     }
     const subagentModel = backgroundModel ?? model
+    const subagentSystemPrompt = generateSubagentSystemPrompt()
+    // Build messages with system message at the beginning (required by Jinja template processing)
+    // SystemModelMessage requires content to be a string, not an array
+    // Remove any existing system messages from input to avoid duplicates
+    const nonSystemMessages = sanitizeMessages(params.messages).filter((msg) => (msg as Record<string, unknown>).role !== 'system')
+    const subagentSystemMessage = {
+      role: 'system' as const,
+      content: subagentSystemPrompt,
+    }
+    const messagesWithSystem = [subagentSystemMessage, ...nonSystemMessages, userPrompt]
     const { response, reasoning, text, usage } = await withRetry(
       () =>
         generateText({
           model: subagentModel,
-          messages,
-          system: generateSubagentSystemPrompt(),
+          messages: messagesWithSystem,
           stopWhen: stepCountIs(Infinity),
           onFinish: async () => {
             await close()
@@ -599,7 +687,6 @@ export const createAgent = (
       readContainerFile(`${rolePath}/soul.md`).catch(() => ''),
       readContainerFile(`${rolePath}/task.md`).catch(() => ''),
     ])
-    const messages = [...sanitizeMessages(params.messages), userPrompt]
     const sessionId = `subagent:${identity.botId}:${params.name}:${Date.now()}`
     const { tools, toolNames: _subToolNames, close } = await getAgentTools(sessionId)
     const toolContext = generateToolContext(_subToolNames)
@@ -615,6 +702,15 @@ export const createAgent = (
       soulContent: roleSoul,
       taskContent: roleTask,
     })
+    // Build messages with system message at the beginning (required by Jinja template processing)
+    // SystemModelMessage requires content to be a string, not an array
+    // Remove any existing system messages from input to avoid duplicates
+    const nonSystemMessages = sanitizeMessages(params.messages).filter((msg) => (msg as Record<string, unknown>).role !== 'system')
+    const systemMessage = {
+      role: 'system' as const,
+      content: sysPrompt,
+    }
+    const messages = [systemMessage, ...nonSystemMessages, userPrompt]
 
     const result: { messages: ModelMessage[]; reasoning: string[]; usage: LanguageModelUsage | null } = {
       messages: [], reasoning: [], usage: null,
@@ -625,7 +721,6 @@ export const createAgent = (
     const { fullStream } = streamText({
       model: subagentModel,
       messages,
-      system: sysPrompt,
       stopWhen: stepCountIs(Infinity),
       tools,
       abortSignal: params.abortSignal,
@@ -688,12 +783,20 @@ export const createAgent = (
     const { tools, toolNames: schedToolNames, close } = await getAgentTools(sessionId)
     const systemPromptText = await generateSystemPrompt(isHeartbeat ? 'micro' : 'minimal', schedToolNames)
     const scheduleModel = backgroundModel ?? model
+    // Build messages with system message at the beginning (required by Jinja template processing)
+    // SystemModelMessage requires content to be a string, not an array
+    // Remove any existing system messages from input to avoid duplicates
+    const nonSystemMessages = messages.filter((msg) => (msg as Record<string, unknown>).role !== 'system')
+    const scheduleSystemMessage = {
+      role: 'system' as const,
+      content: systemPromptText,
+    }
+    const messagesWithSystem = [scheduleSystemMessage, ...nonSystemMessages]
     const { response, reasoning, text, usage } = await withRetry(
       () =>
         generateText({
           model: scheduleModel,
-          messages,
-          system: systemPromptText,
+          messages: messagesWithSystem,
           stopWhen: stepCountIs(Infinity),
           onFinish: async () => {
             await close()
@@ -766,11 +869,22 @@ export const createAgent = (
 
   async function* stream(input: AgentInput): AsyncGenerator<AgentAction> {
     const userPrompt = generateUserPrompt(input)
-    const messages = [...sanitizeMessages(input.messages), userPrompt]
     await Promise.all(input.skills.map((skill) => enableSkill(skill)))
+    // Auto-enable skills based on file attachments
+    await autoEnableSkillsFromAttachments(input.attachments)
     const sessionId = `stream:${identity.botId}:${Date.now()}`
     const { tools, toolNames: streamToolNames, close } = await getAgentTools(sessionId)
     const systemPrompt = await generateSystemPrompt('full', streamToolNames)
+    // Build messages with system message at the beginning (required by Jinja template processing)
+    // SystemModelMessage requires content to be a string, not an array
+    // Remove any existing system messages from input to avoid duplicates
+    const nonSystemMessages = sanitizeMessages(input.messages).filter((msg) => (msg as Record<string, unknown>).role !== 'system')
+    const systemMessage = {
+      role: 'system' as const,
+      content: systemPrompt,
+    }
+    const messages = [systemMessage, ...nonSystemMessages, userPrompt]
+    console.log('[Agent stream] Built messages:', messages.map((m: any) => ({ role: m.role, contentType: typeof m.content, contentPreview: typeof m.content === 'string' ? m.content?.slice(0, 200) : JSON.stringify(m.content)?.slice(0, 200) })))
     const attachmentsExtractor = new AttachmentsStreamExtractor()
     const result: {
       messages: ModelMessage[];
@@ -797,7 +911,6 @@ export const createAgent = (
     const { fullStream } = streamText({
       model,
       messages,
-      system: systemPrompt,
       stopWhen: stepCountIs(Infinity),
       tools,
       providerOptions,

@@ -32,8 +32,8 @@ const (
 	// Max missed pong before reconnect
 	MaxMissedPong = 2
 
-	// Reply ack timeout (30 seconds for long operations like image analysis)
-	ReplyAckTimeout = 30 * time.Second
+	// Reply ack timeout (10 seconds - balance between reliability and speed)
+	ReplyAckTimeout = 10 * time.Second
 
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
@@ -102,12 +102,47 @@ func NewWebSocketClient(config *Config, logger *slog.Logger, handler MessageHand
 
 // Start initiates the WebSocket connection and starts the message loop
 func (c *WebSocketClient) Start(ctx context.Context) error {
-	if err := c.connect(ctx); err != nil {
-		return fmt.Errorf("initial connection failed: %w", err)
+	c.logger.Info("starting websocket client",
+		slog.String("bot_id", c.botID),
+		slog.String("ws_url", c.config.WebsocketURL),
+		slog.Bool("group_chat_enabled", c.config.GroupChatEnabled),
+		slog.Bool("require_mention", c.config.RequireMention))
+
+	// Retry initial connection with exponential backoff
+	var lastErr error
+	for attempt := 1; attempt <= MaxReconnectAttempts; attempt++ {
+		if err := c.connect(ctx); err != nil {
+			lastErr = err
+			c.logger.Warn("initial connection attempt failed",
+				slog.Int("attempt", attempt),
+				slog.Int("max_attempts", MaxReconnectAttempts),
+				slog.Any("error", err))
+
+			if attempt < MaxReconnectAttempts {
+				// 指数退避算法：1s -> 2s -> 4s -> ... -> 30s 上限
+				delay := time.Duration(1<<uint(attempt-1)) * time.Second
+				if delay < time.Second {
+					delay = time.Second
+				}
+				if delay > 30*time.Second {
+					delay = 30 * time.Second
+				}
+				c.logger.Info("retrying connection", slog.Duration("delay", delay))
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+					continue
+				}
+			}
+		} else {
+			// Connection successful
+			go c.run(ctx)
+			return nil
+		}
 	}
 
-	go c.run(ctx)
-	return nil
+	return fmt.Errorf("initial connection failed after %d attempts: %w", MaxReconnectAttempts, lastErr)
 }
 
 // Stop closes the WebSocket connection
@@ -143,19 +178,45 @@ func (c *WebSocketClient) connect(ctx context.Context) error {
 		return nil
 	}
 
+	// Configure TLS with more permissive settings to handle various server configurations
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: false,
+		MinVersion:         tls.VersionTLS12,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		},
+	}
+
 	dialer := websocket.Dialer{
-		TLSClientConfig:  &tls.Config{InsecureSkipVerify: false},
-		HandshakeTimeout: ConnectionTimeout,
+		TLSClientConfig:    tlsConfig,
+		HandshakeTimeout:   ConnectionTimeout,
+		ReadBufferSize:     64 * 1024,
+		WriteBufferSize:    64 * 1024,
+		EnableCompression:  true,
 	}
 
 	headers := http.Header{}
 	headers.Set("User-Agent", "WeCom-Bot-Client/1.0")
 
-	c.logger.Info("Connecting to WebSocket", slog.String("url", c.config.WebsocketURL))
+	c.logger.Info("Connecting to WebSocket",
+		slog.String("url", c.config.WebsocketURL),
+		slog.Duration("timeout", ConnectionTimeout))
 
-	conn, _, err := dialer.DialContext(ctx, c.config.WebsocketURL, headers)
+	conn, resp, err := dialer.DialContext(ctx, c.config.WebsocketURL, headers)
 	if err != nil {
-		c.logger.Error("websocket dial failed", slog.Any("error", err))
+		c.logger.Error("websocket dial failed",
+			slog.Any("error", err),
+			slog.String("url", c.config.WebsocketURL))
+		if resp != nil {
+			c.logger.Error("websocket handshake response",
+				slog.Int("status", resp.StatusCode),
+				slog.Any("headers", resp.Header))
+		}
 		return fmt.Errorf("dial failed: %w", err)
 	}
 
@@ -277,7 +338,8 @@ func (c *WebSocketClient) readMessage(ctx context.Context) error {
 	c.logger.Info("websocket message received",
 		slog.String("cmd", msg.Cmd),
 		slog.String("req_id", msg.Headers.ReqID),
-		slog.Int("errcode", msg.ErrCode))
+		slog.Int("errcode", msg.ErrCode),
+		slog.Int("body_len", len(msg.Body)))
 
 	// Handle based on cmd type
 	switch msg.Cmd {
@@ -437,10 +499,15 @@ func (c *WebSocketClient) reconnect(ctx context.Context) error {
 			c.logger.Error("reconnect attempt failed",
 				slog.Int("attempt", c.reconnectAttempts),
 				slog.Any("error", err))
-			delay := time.Duration(c.reconnectAttempts) * ReconnectDelay
-			if delay > 60*time.Second {
-				delay = 60 * time.Second
+			// 指数退避算法：1s -> 2s -> 4s -> ... -> 30s 上限
+			delay := time.Duration(1<<uint(c.reconnectAttempts-1)) * time.Second
+			if delay < time.Second {
+				delay = time.Second
 			}
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			c.logger.Info("waiting before next reconnect attempt", slog.Duration("delay", delay))
 			time.Sleep(delay)
 			continue
 		}
@@ -514,9 +581,55 @@ func (c *WebSocketClient) SendReply(ctx context.Context, reqID string, body inte
 	})
 }
 
-// SendStream sends a stream message immediately without waiting for ACK
-// This is optimized for streaming output where low latency is more important
+// SendStream sends a stream message. For intermediate updates (finish=false),
+// it uses fire-and-forget for low latency. For final messages (finish=true),
+// it uses the serial queue to ensure delivery.
 func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody) error {
+	// For final messages, use queue to ensure delivery
+	if body.Stream.Finish {
+		return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
+			frame := WebsocketMessage{
+				Cmd:     CmdRespondMsg,
+				Headers: MessageHeaders{ReqID: reqID},
+			}
+
+			bodyBytes, err := json.Marshal(body)
+			if err != nil {
+				reject(fmt.Errorf("marshal stream body failed: %w", err))
+				return
+			}
+			frame.Body = bodyBytes
+
+			item := &ReplyQueueItem{
+				Frame:   frame,
+				Resolve: resolve,
+				Reject:  reject,
+			}
+
+			c.queueMu.Lock()
+			defer c.queueMu.Unlock()
+
+			queue, exists := c.replyQueues[reqID]
+			if !exists {
+				queue = []*ReplyQueueItem{}
+			}
+
+			if len(queue) >= MaxReplyQueueSize {
+				reject(fmt.Errorf("reply queue for req_id %s exceeds max size (%d)", reqID, MaxReplyQueueSize))
+				return
+			}
+
+			queue = append(queue, item)
+			c.replyQueues[reqID] = queue
+
+			if len(queue) == 1 {
+				go c.processReplyQueue(reqID)
+			}
+		})
+	}
+
+	// For intermediate updates, check connection and send synchronously
+	// but don't wait for ACK to avoid blocking
 	c.mu.RLock()
 	conn := c.conn
 	connected := c.connected
@@ -537,21 +650,21 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 	}
 	frame.Body = bodyBytes
 
-	// Use non-blocking send for streaming to avoid backpressure
-	// Fire-and-forget: stream messages don't need to wait for ACK
+	// Send synchronously but don't wait for ACK
+	// This ensures we catch connection errors immediately
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
-		// Use a goroutine for truly async sending to prevent blocking the stream
-		go func() {
-			if err := conn.WriteJSON(frame); err != nil {
-				c.logger.Debug("stream message send failed (async)", slog.String("req_id", reqID), slog.Any("error", err))
-			}
-		}()
+		if err := conn.WriteJSON(frame); err != nil {
+			c.logger.Warn("stream message send failed", slog.String("req_id", reqID), slog.Any("error", err))
+			// Trigger reconnect on write failure
+			go c.triggerReconnect()
+			return fmt.Errorf("websocket write failed: %w", err)
+		}
 	}
 
-	c.logger.Debug("stream message sent (async, no ack wait)", slog.String("req_id", reqID), slog.Bool("finish", body.Stream.Finish))
+	c.logger.Debug("stream message sent", slog.String("req_id", reqID), slog.Bool("finish", body.Stream.Finish))
 	return nil
 }
 

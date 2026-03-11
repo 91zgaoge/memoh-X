@@ -85,6 +85,10 @@
     "frontend-slides": {
       "order": 300,
       "enabled": true
+    },
+    "rag-documents": {
+      "order": 310,
+      "enabled": true
     }
   }
 }

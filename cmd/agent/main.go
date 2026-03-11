@@ -483,8 +483,12 @@ func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, msgService *m
 	return registry
 }
 
-func provideChannelRouter(log *slog.Logger, registry *channel.Registry, routeService *route.DBService, msgService *message.DBService, resolver *flow.Resolver, identityService *identities.Service, botService *bots.Service, policyService *policy.Service, preauthService *preauth.Service, bindService *bind.Service, rc *boot.RuntimeConfig) *inbound.ChannelInboundProcessor {
-	proc := inbound.NewChannelInboundProcessor(log, registry, routeService, msgService, resolver, identityService, botService, policyService, preauthService, bindService, rc.JwtSecret, 5*time.Minute)
+func provideChannelRouter(log *slog.Logger, registry *channel.Registry, routeService *route.DBService, msgService *message.DBService, resolver *flow.Resolver, identityService *identities.Service, botService *bots.Service, policyService *policy.Service, preauthService *preauth.Service, bindService *bind.Service, rc *boot.RuntimeConfig, cfg config.Config) *inbound.ChannelInboundProcessor {
+	dataRoot := strings.TrimSpace(cfg.MCP.DataRoot)
+	if dataRoot == "" {
+		dataRoot = "/opt/memoh/data"
+	}
+	proc := inbound.NewChannelInboundProcessor(log, registry, routeService, msgService, resolver, identityService, botService, policyService, preauthService, bindService, rc.JwtSecret, 5*time.Minute, dataRoot)
 	proc.SetGroupDebouncer(message.NewGroupDebouncer(3 * time.Second))
 	return proc
 }

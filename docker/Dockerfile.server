@@ -6,8 +6,9 @@ WORKDIR /build
 RUN apk add --no-cache git make
 
 COPY go.mod go.sum ./
+ARG GOPROXY=https://goproxy.cn,direct
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    GOPROXY=${GOPROXY} go mod download
 
 COPY . .
 

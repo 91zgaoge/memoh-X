@@ -1721,7 +1721,7 @@ func (r *Resolver) streamChat(ctx context.Context, payload gatewayRequest, req c
 		return err
 	}
 	url := r.gatewayBaseURL + "/chat/stream"
-	r.logger.Info("gateway stream request", slog.String("url", url), slog.String("body_prefix", truncate(string(body), 200)))
+	r.logger.Info("gateway stream request", slog.String("url", url), slog.String("body_prefix", truncate(string(body), 200)), slog.String("query", truncate(req.Query, 500)), slog.Int("query_length", len(req.Query)), slog.Int("messages_count", len(payload.Messages)), slog.Any("attachments", payload.Attachments))
 	// Use a cancellable context so the HTTP request is aborted when the client
 	// disconnects or the idle-timeout fires. Persistence operations below use
 	// context.WithoutCancel individually to survive cancellation.
@@ -3289,7 +3289,7 @@ func sanitizeMessages(messages []conversation.ModelMessage) []conversation.Model
 	supportedRoles := map[string]bool{
 		"user": true, "assistant": true, "system": true, "tool": true,
 	}
-	cleaned := make([]conversation.ModelMessage, 0, len(messages))
+	var systemMsgs, otherMsgs []conversation.ModelMessage
 	for _, msg := range messages {
 		role := strings.TrimSpace(msg.Role)
 		if role == "" {
@@ -3302,9 +3302,15 @@ func sanitizeMessages(messages []conversation.ModelMessage) []conversation.Model
 		if !msg.HasContent() && strings.TrimSpace(msg.ToolCallID) == "" && len(collectAssistantToolIDs(msg)) == 0 {
 			continue
 		}
-		cleaned = append(cleaned, msg)
+		// Separate system messages from other messages
+		if role == "system" {
+			systemMsgs = append(systemMsgs, msg)
+		} else {
+			otherMsgs = append(otherMsgs, msg)
+		}
 	}
-	return cleaned
+	// System messages must be at the beginning (required by Jinja template processing)
+	return append(systemMsgs, otherMsgs...)
 }
 
 func dedup(items []string) []string {

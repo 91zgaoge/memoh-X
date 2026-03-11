@@ -7,6 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/message"
+	"golang.org/x/time/rate"
 )
 
 // newChatCommands contains keywords that trigger a new conversation (clear history)
@@ -41,6 +45,11 @@ type Adapter struct {
 	mu             sync.RWMutex
 	httpClient     *http.Client
 	messageService message.Service // Optional: for clearing history on new chat
+
+	// Rate limiters for send message
+	// WeCom限制：30条/分钟，1000条/小时
+	minuteLimiter *rate.Limiter // 30条/分钟
+	hourLimiter   *rate.Limiter // 1000条/小时
 }
 
 // NewWeComAdapter creates a new WeCom adapter (alias for NewAdapter for compatibility)
@@ -64,6 +73,10 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 		httpClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
+		// 初始化频率限制器：30条/分钟，1000条/小时
+		// burst设置为1，确保严格限速
+		minuteLimiter: rate.NewLimiter(rate.Every(2*time.Second), 1), // 30条/分钟 = 每2秒1条
+		hourLimiter:   rate.NewLimiter(rate.Every(3600*time.Second/1000), 1), // 1000条/小时
 	}
 }
 
@@ -73,17 +86,21 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 		return
 	}
 
-	thinkingBody := RespondMsgBody{
-		MsgType: MsgTypeText,
-		Text: &TextContent{
+	// Use stream format for thinking reply (same as final response)
+	thinkingBody := StreamMsgBody{
+		MsgType: MsgTypeStream,
+		Stream: StreamResponse{
+			ID:      generateStreamID(),
+			Finish:  false, // Not finished, will be updated with final response
 			Content: "思考中...",
 		},
 	}
 
-	if err := wsClient.SendReply(ctx, reqID, thinkingBody, CmdRespondUpdate); err != nil {
+	// Use SendStream for thinking reply (fire-and-forget, no ACK wait)
+	if err := wsClient.SendStream(ctx, reqID, thinkingBody); err != nil {
 		a.logger.Debug("failed to send thinking reply", slog.Any("error", err))
 	} else {
-		a.logger.Debug("thinking reply sent", slog.String("req_id", reqID))
+		a.logger.Info("thinking reply sent", slog.String("req_id", reqID))
 	}
 }
 
@@ -283,8 +300,11 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 		slog.String("msg_type", body.MsgType),
 		slog.String("from", body.From.UserID),
 		slog.String("chat_type", body.ChatType),
+		slog.String("chat_id", body.ChatID),
 		slog.String("req_id", wsMsg.Headers.ReqID),
-		slog.String("content_preview", truncateString(contentPreview, 50)))
+		slog.String("content_preview", truncateString(contentPreview, 100)),
+		slog.Bool("group_chat_enabled", config.GroupChatEnabled),
+		slog.Bool("require_mention", config.RequireMention))
 
 	// Determine reply target based on chat type
 	replyTarget := ""
@@ -339,6 +359,9 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			if body.ChatType == "group" {
 				a.logger.Info("group text message received",
 					slog.String("content", originalContent),
+					slog.String("bot_id", cfg.BotID),
+					slog.Bool("group_chat_enabled", config.GroupChatEnabled),
+					slog.Bool("require_mention", config.RequireMention),
 					slog.Bool("should_trigger", config.ShouldTriggerGroupResponse(originalContent)))
 			}
 
@@ -366,7 +389,14 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			if shouldTrigger {
 				// Send immediate "thinking" reply for better UX
 				a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
-				return handler(ctx, cfg, msg)
+				a.logger.Info("calling handler for text message", slog.String("req_id", wsMsg.Headers.ReqID), slog.String("content", content))
+				err := handler(ctx, cfg, msg)
+				if err != nil {
+					a.logger.Error("handler returned error", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+				} else {
+					a.logger.Info("handler completed successfully", slog.String("req_id", wsMsg.Headers.ReqID))
+				}
+				return err
 			}
 			a.logger.Info("skipping group message (no mention)")
 			return nil
@@ -374,13 +404,16 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 
 	case MsgTypeImage:
 		if body.Image != nil {
-			// For group chats, mark as mentioned (users typically expect response when sending images)
+			// SDK限制：图片消息仅支持单聊
 			if body.ChatType == "group" {
+				a.logger.Warn("image message received in group chat, but image type only supports single chat according to SDK docs",
+					slog.String("chat_id", body.ChatID),
+					slog.String("from_user", body.From.UserID))
 				msg.Metadata["is_mentioned"] = true
 			}
 
 			// Download and decrypt image
-			data, err := a.downloadAndDecrypt(body.Image.URL, body.Image.AESKey)
+			result, err := a.downloadAndDecrypt(body.Image.URL, body.Image.AESKey)
 			if err != nil {
 				a.logger.Error("failed to download/decrypt image", slog.Any("error", err))
 				// Continue with URL only
@@ -395,49 +428,90 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 				msg.Message.Attachments = append(msg.Message.Attachments, channel.Attachment{
 					Type:     channel.AttachmentImage,
 					URL:      body.Image.URL,
-					Data:     data,
+					Data:     result.Data,
 					Metadata: map[string]any{
 						"aeskey": body.Image.AESKey,
-						"size":   len(data),
+						"size":   len(result.Data),
 					},
 				})
 			}
+			// Set a default text for pure image messages so buildInboundQuery doesn't return empty
+			msg.Message.Text = "[用户发送了一张图片]"
+			msg.Message.Format = channel.MessageFormatPlain
 			// Send immediate "thinking" reply for better UX
 			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
-			return handler(ctx, cfg, msg)
+			a.logger.Info("calling handler for image message", slog.String("req_id", wsMsg.Headers.ReqID))
+			err = handler(ctx, cfg, msg)
+			if err != nil {
+				a.logger.Error("handler returned error for image", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+			} else {
+				a.logger.Info("handler completed successfully for image", slog.String("req_id", wsMsg.Headers.ReqID))
+			}
+			return err
 		}
 
 	case MsgTypeFile:
 		if body.File != nil {
-			// For group chats, mark as mentioned (users typically expect response when sending files)
+			// SDK限制：文件消息仅支持单聊
 			if body.ChatType == "group" {
+				a.logger.Warn("file message received in group chat, but file type only supports single chat according to SDK docs",
+					slog.String("chat_id", body.ChatID),
+					slog.String("from_user", body.From.UserID))
 				msg.Metadata["is_mentioned"] = true
 			}
 
-			// Download and decrypt file
-			data, err := a.downloadAndDecrypt(body.File.URL, body.File.AESKey)
+			// Get filename - use provided name or extract from URL
+			fileName := body.File.FileName
+			a.logger.Info("processing file message", slog.String("providedFileName", fileName), slog.String("url", body.File.URL))
+			if fileName == "" {
+				fileName = extractFileNameFromURL(body.File.URL)
+				a.logger.Info("extracted filename from URL", slog.String("fileName", fileName))
+			}
+
+			// Download and decrypt file (filename from Content-Disposition header takes precedence)
+			result, err := a.downloadAndDecrypt(body.File.URL, body.File.AESKey)
 			if err != nil {
 				a.logger.Error("failed to download/decrypt file", slog.Any("error", err))
+				// Get MIME type based on file extension
+				mimeType := getMimeTypeFromFileName(fileName)
+				a.logger.Info("file download failed, using mime type from filename", slog.String("fileName", fileName), slog.String("mimeType", mimeType))
 				msg.Message.Attachments = append(msg.Message.Attachments, channel.Attachment{
 					Type: channel.AttachmentFile,
 					URL:  body.File.URL,
-					Name: body.File.FileName,
+					Name: fileName,
+					Mime: mimeType,
 					Metadata: map[string]any{
 						"aeskey": body.File.AESKey,
 					},
 				})
 			} else {
+				// Use filename from Content-Disposition header if available (SDK compliant)
+				if result.FileName != "" {
+					a.logger.Info("using filename from Content-Disposition header", slog.String("fileName", result.FileName))
+					fileName = result.FileName
+				}
+				// Get MIME type based on file extension
+				mimeType := getMimeTypeFromFileName(fileName)
+				a.logger.Info("file download success", slog.String("fileName", fileName), slog.String("mimeType", mimeType), slog.Int("dataSize", len(result.Data)))
 				msg.Message.Attachments = append(msg.Message.Attachments, channel.Attachment{
 					Type:     channel.AttachmentFile,
 					URL:      body.File.URL,
-					Name:     body.File.FileName,
-					Data:     data,
+					Name:     fileName,
+					Mime:     mimeType,
+					Data:     result.Data,
 					Metadata: map[string]any{
 						"aeskey": body.File.AESKey,
-						"size":   len(data),
+						"size":   len(result.Data),
 					},
 				})
 			}
+			// Set a default text for pure file messages so buildInboundQuery doesn't return empty
+			displayName := fileName
+			if displayName == "" {
+				displayName = "未知文件"
+			}
+			msg.Message.Text = "[用户发送了一个文件: " + displayName + "]"
+			msg.Message.Format = channel.MessageFormatPlain
 			// Send immediate "thinking" reply for better UX
 			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
 			return handler(ctx, cfg, msg)
@@ -445,8 +519,11 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 
 	case MsgTypeVoice:
 		if body.Voice != nil {
-			// For group chats, mark as mentioned
+			// SDK限制：语音消息仅支持单聊
 			if body.ChatType == "group" {
+				a.logger.Warn("voice message received in group chat, but voice type only supports single chat according to SDK docs",
+					slog.String("chat_id", body.ChatID),
+					slog.String("from_user", body.From.UserID))
 				msg.Metadata["is_mentioned"] = true
 			}
 
@@ -544,7 +621,21 @@ func (a *Adapter) handleEventCallback(ctx context.Context, cfg channel.ChannelCo
 		}
 
 	case EventTypeDisconnected:
-		a.logger.Info("received disconnected event")
+		// 当有新连接建立时，系统会给旧连接发送该事件
+		// 每个机器人同时只能保持一个有效长连接，新连接会踢掉旧连接
+		a.logger.Warn("received disconnected event: new connection established, this connection will be closed",
+			slog.String("bot_id", cfg.BotID),
+			slog.String("config_id", cfg.ID))
+
+		// 获取 WebSocket 客户端并触发重连
+		if wsClient := a.getWebSocketClient(cfg.BotID); wsClient != nil {
+			// 标记为手动关闭以避免自动重连
+			wsClient.isManualClose = true
+			a.logger.Info("marking connection as manually closed due to disconnected_event")
+		}
+
+		// 通知用户连接被替换
+		a.logger.Info("connection replaced by new connection, please check for duplicate bot instances")
 
 	default:
 		a.logger.Debug("unhandled event type", slog.String("event_type", eventType))
@@ -575,7 +666,7 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 		case MsgTypeImage:
 			if item.Image != nil {
 				// Download and decrypt image
-				data, err := a.downloadAndDecrypt(item.Image.URL, item.Image.AESKey)
+				result, err := a.downloadAndDecrypt(item.Image.URL, item.Image.AESKey)
 				if err != nil {
 					a.logger.Error("failed to download/decrypt mixed image", slog.Any("error", err))
 					attachments = append(attachments, channel.Attachment{
@@ -589,10 +680,58 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 					attachments = append(attachments, channel.Attachment{
 						Type:     channel.AttachmentImage,
 						URL:      item.Image.URL,
-						Data:     data,
+						Data:     result.Data,
 						Metadata: map[string]any{
 							"aeskey": item.Image.AESKey,
-							"size":   len(data),
+							"size":   len(result.Data),
+						},
+					})
+				}
+			}
+		case MsgTypeFile:
+			if item.File != nil {
+				// Get filename - use provided name or extract from URL
+				fileName := item.File.FileName
+				a.logger.Info("processing mixed file message", slog.String("providedFileName", fileName), slog.String("url", item.File.URL))
+				if fileName == "" {
+					fileName = extractFileNameFromURL(item.File.URL)
+					a.logger.Info("extracted filename from URL for mixed content", slog.String("fileName", fileName))
+				}
+
+				// Download and decrypt file (filename from Content-Disposition header takes precedence)
+				result, err := a.downloadAndDecrypt(item.File.URL, item.File.AESKey)
+				if err != nil {
+					a.logger.Error("failed to download/decrypt mixed file", slog.Any("error", err))
+					// Get MIME type based on file extension
+					mimeType := getMimeTypeFromFileName(fileName)
+					a.logger.Info("mixed file download failed, using mime type from filename", slog.String("fileName", fileName), slog.String("mimeType", mimeType))
+					attachments = append(attachments, channel.Attachment{
+						Type: channel.AttachmentFile,
+						URL:  item.File.URL,
+						Name: fileName,
+						Mime: mimeType,
+						Metadata: map[string]any{
+							"aeskey": item.File.AESKey,
+						},
+					})
+				} else {
+					// Use filename from Content-Disposition header if available (SDK compliant)
+					if result.FileName != "" {
+						a.logger.Info("using filename from Content-Disposition header for mixed content", slog.String("fileName", result.FileName))
+						fileName = result.FileName
+					}
+					// Get MIME type based on file extension
+					mimeType := getMimeTypeFromFileName(fileName)
+					a.logger.Info("mixed file download success", slog.String("fileName", fileName), slog.String("mimeType", mimeType), slog.Int("dataSize", len(result.Data)))
+					attachments = append(attachments, channel.Attachment{
+						Type:     channel.AttachmentFile,
+						URL:      item.File.URL,
+						Name:     fileName,
+						Mime:     mimeType,
+						Data:     result.Data,
+						Metadata: map[string]any{
+							"aeskey": item.File.AESKey,
+							"size":   len(result.Data),
 						},
 					})
 				}
@@ -649,16 +788,22 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 	return handler(ctx, cfg, msg)
 }
 
+// DownloadResult holds the result of a file download including metadata
+type DownloadResult struct {
+	Data     []byte
+	FileName string
+}
+
 // downloadAndDecrypt downloads and decrypts a file from WeCom
-func (a *Adapter) downloadAndDecrypt(url, aesKey string) ([]byte, error) {
-	if url == "" {
+func (a *Adapter) downloadAndDecrypt(fileURL, aesKey string) (*DownloadResult, error) {
+	if fileURL == "" {
 		return nil, fmt.Errorf("url is empty")
 	}
 
-	a.logger.Info("downloading file", slog.String("url", url))
+	a.logger.Info("downloading file", slog.String("url", fileURL))
 
 	// Download file
-	resp, err := a.httpClient.Get(url)
+	resp, err := a.httpClient.Get(fileURL)
 	if err != nil {
 		return nil, fmt.Errorf("download file: %w", err)
 	}
@@ -673,11 +818,23 @@ func (a *Adapter) downloadAndDecrypt(url, aesKey string) ([]byte, error) {
 		return nil, fmt.Errorf("read file data: %w", err)
 	}
 
-	a.logger.Info("file downloaded", slog.Int("size", len(data)))
+	// Extract filename from HTTP headers (Content-Disposition) - SDK compliant
+	fileName := extractFileNameFromHeaders(resp.Header)
+	if fileName == "" {
+		// Fallback: extract from URL
+		fileName = extractFileNameFromURL(fileURL)
+	}
+
+	a.logger.Info("file downloaded",
+		slog.Int("size", len(data)),
+		slog.String("filename", fileName))
 
 	// If no AES key, return raw data
 	if aesKey == "" {
-		return data, nil
+		return &DownloadResult{
+			Data:     data,
+			FileName: fileName,
+		}, nil
 	}
 
 	// Decrypt file
@@ -687,7 +844,40 @@ func (a *Adapter) downloadAndDecrypt(url, aesKey string) ([]byte, error) {
 	}
 
 	a.logger.Info("file decrypted", slog.Int("decrypted_size", len(decrypted)))
-	return decrypted, nil
+	return &DownloadResult{
+		Data:     decrypted,
+		FileName: fileName,
+	}, nil
+}
+
+// extractFileNameFromHeaders extracts filename from HTTP Content-Disposition header
+// Follows RFC5987 for UTF-8 encoded filenames (SDK compliant)
+func extractFileNameFromHeaders(header http.Header) string {
+	contentDisposition := header.Get("Content-Disposition")
+	if contentDisposition == "" {
+		return ""
+	}
+
+	// Match filename*=UTF-8''xxx format (RFC5987)
+	utf8Regex := regexp.MustCompile(`filename\*=UTF-8''([^;\s]+)`)
+	if matches := utf8Regex.FindStringSubmatch(contentDisposition); matches != nil {
+		filename, err := url.QueryUnescape(matches[1])
+		if err == nil {
+			return filepath.Base(filename)
+		}
+	}
+
+	// Match filename="xxx" or filename=xxx format
+	filenameRegex := regexp.MustCompile(`filename="?([^";\s]+)"?`)
+	if matches := filenameRegex.FindStringSubmatch(contentDisposition); matches != nil {
+		filename, err := url.QueryUnescape(matches[1])
+		if err == nil {
+			return filepath.Base(filename)
+		}
+		return filepath.Base(matches[1])
+	}
+
+	return ""
 }
 
 // getWebSocketClient returns the WebSocket client for a bot
@@ -735,6 +925,114 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// extractFileNameFromURL extracts a filename from a URL.
+// It tries to get the last path segment or returns a default name.
+func extractFileNameFromURL(fileURL string) string {
+	parsedURL, err := url.Parse(fileURL)
+	if err != nil {
+		return ""
+	}
+	// Get the last path segment
+	path := parsedURL.Path
+	if path == "" {
+		return ""
+	}
+	base := filepath.Base(path)
+	// Remove any query parameters from the base
+	if idx := strings.Index(base, "?"); idx != -1 {
+		base = base[:idx]
+	}
+	return base
+}
+
+// getMimeTypeFromFileName returns a MIME type based on the file extension.
+func getMimeTypeFromFileName(fileName string) string {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	switch ext {
+	case ".pdf":
+		return "application/pdf"
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".doc":
+		return "application/msword"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".xls":
+		return "application/vnd.ms-excel"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case ".ppt":
+		return "application/vnd.ms-powerpoint"
+	case ".txt":
+		return "text/plain"
+	case ".csv":
+		return "text/csv"
+	case ".json":
+		return "application/json"
+	case ".xml":
+		return "application/xml"
+	case ".html", ".htm":
+		return "text/html"
+	case ".md":
+		return "text/markdown"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// SendMessage 主动向指定会话发送消息
+// 注意：需要用户先给机器人发消息，且受频率限制（30条/分钟，1000条/小时）
+func (a *Adapter) SendMessage(ctx context.Context, cfg channel.ChannelConfig, chatID string, chatType int, content string) error {
+	// 检查频率限制
+	if !a.minuteLimiter.Allow() {
+		return fmt.Errorf("send message rate limit exceeded: 30 messages per minute")
+	}
+	if !a.hourLimiter.Allow() {
+		return fmt.Errorf("send message rate limit exceeded: 1000 messages per hour")
+	}
+
+	// 获取 WebSocket 客户端
+	a.mu.RLock()
+	wsClient, exists := a.clients[cfg.BotID]
+	a.mu.RUnlock()
+
+	if !exists || !wsClient.IsConnected() {
+		return fmt.Errorf("websocket client not connected for bot %s", cfg.BotID)
+	}
+
+	// 生成新的 req_id 用于主动发送消息
+	reqID := generateReqID(CmdSendMsg)
+
+	// 构建消息体
+	body := SendMarkdownMsgBody{
+		MsgType: MsgTypeMarkdown,
+		Markdown: MarkdownContent{
+			Content: content,
+		},
+		ChatType: chatType,
+	}
+
+	// 使用 CmdSendMsg 命令发送
+	if err := wsClient.SendReply(ctx, reqID, body, CmdSendMsg); err != nil {
+		return fmt.Errorf("send message failed: %w", err)
+	}
+
+	a.logger.Info("message sent successfully",
+		slog.String("chat_id", chatID),
+		slog.Int("chat_type", chatType),
+		slog.String("bot_id", cfg.BotID))
+
+	return nil
+}
+
+// CheckRateLimit 检查当前是否超出频率限制
+// 返回 (是否允许发送, 分钟限制是否允许, 小时限制是否允许)
+func (a *Adapter) CheckRateLimit() (bool, bool, bool) {
+	minuteAllowed := a.minuteLimiter.Allow()
+	hourAllowed := a.hourLimiter.Allow()
+	return minuteAllowed && hourAllowed, minuteAllowed, hourAllowed
 }
 
 // Ensure Adapter implements required interfaces

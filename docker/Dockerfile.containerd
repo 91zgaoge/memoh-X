@@ -8,7 +8,7 @@ RUN apk add --no-cache ca-certificates git
 
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    GOPROXY=https://goproxy.cn,direct go mod download
 
 COPY . .
 
@@ -51,10 +51,11 @@ RUN apk add --no-cache python3 py3-pip && \
 
 # OpenViking context database (optional, enabled per-bot)
 # Needs build toolchain: Go+make for AGFS server, gcc/g++/cmake for pybind11 C++ extensions
+# Note: Build may fail due to network issues, making it optional
 RUN apk add --no-cache --virtual .ov-build-deps \
         go make gcc g++ musl-dev python3-dev cmake git && \
-    pip install --break-system-packages openviking && \
-    apk del .ov-build-deps
+    (pip install --break-system-packages openviking || echo "openviking install failed, skipping") && \
+    apk del .ov-build-deps || true
 
 COPY --from=mcp-builder /out/mcp /opt/mcp
 COPY cmd/mcp/template /opt/mcp-template
@@ -101,9 +102,11 @@ FROM alpine:latest
 ARG TZ=UTC
 ENV TZ=${TZ}
 
-RUN apk add --no-cache containerd containerd-ctr tzdata \
+RUN apk add --no-cache containerd containerd-ctr tzdata cni-plugins \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
-    && echo "${TZ}" > /etc/timezone
+    && echo "${TZ}" > /etc/timezone \
+    && mkdir -p /opt/cni/bin /etc/cni/net.d \
+    && cp -a /usr/libexec/cni/* /opt/cni/bin/ 2>/dev/null || true
 
 COPY --from=oci-exporter /out/memoh-mcp.tar /opt/images/memoh-mcp.tar
 COPY docker/containerd-entrypoint.sh /entrypoint.sh

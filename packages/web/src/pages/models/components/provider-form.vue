@@ -71,26 +71,77 @@
       </section>
     </div>
 
-    <section class="flex justify-end mt-4 gap-4">
-      <ConfirmPopover
-        :message="$t('provider.deleteConfirm')"
-        :loading="deleteLoading"
-        @confirm="$emit('delete')"
-      >
-        <template #trigger>
-          <Button variant="outline">
-            <FontAwesomeIcon :icon="['far', 'trash-can']" />
-          </Button>
-        </template>
-      </ConfirmPopover>
-
+    <section class="flex justify-between items-center mt-4 gap-4">
       <Button
-        type="submit"
-        :disabled="!hasChanges || !form.meta.value.valid"
+        type="button"
+        variant="outline"
+        :disabled="testLoading || !props.provider?.id"
+        @click="runTest"
       >
-        <Spinner v-if="editLoading" />
-        {{ $t('provider.saveChanges') }}
+        <Spinner v-if="testLoading" />
+        <FontAwesomeIcon
+          v-else
+          :icon="['fas', 'rotate']"
+        />
+        {{ $t('provider.testConnection') }}
       </Button>
+
+      <div class="flex gap-4">
+        <ConfirmPopover
+          :message="$t('provider.deleteConfirm')"
+          :loading="deleteLoading"
+          @confirm="$emit('delete')"
+        >
+          <template #trigger>
+            <Button variant="outline">
+              <FontAwesomeIcon :icon="['far', 'trash-can']" />
+            </Button>
+          </template>
+        </ConfirmPopover>
+
+        <Button
+          type="submit"
+          :disabled="!hasChanges || !form.meta.value.valid"
+        >
+          <Spinner v-if="editLoading" />
+          {{ $t('provider.saveChanges') }}
+        </Button>
+      </div>
+    </section>
+
+    <section
+      v-if="testResult"
+      class="mt-4 rounded-lg border p-4 space-y-3 text-sm"
+    >
+      <div class="flex items-center gap-2">
+        <span
+          class="inline-block size-2 rounded-full"
+          :class="testResult.reachable ? 'bg-green-500' : 'bg-red-500'"
+        />
+        <span class="font-medium">
+          {{ testResult.reachable ? $t('provider.reachable') : $t('provider.unreachable') }}
+        </span>
+        <span
+          v-if="testResult.latency_ms"
+          class="text-muted-foreground"
+        >
+          {{ testResult.latency_ms }}ms
+        </span>
+      </div>
+
+      <div
+        v-if="testResult.message"
+        class="text-muted-foreground text-xs"
+      >
+        {{ testResult.message }}
+      </div>
+
+      <div
+        v-if="testError"
+        class="text-destructive text-xs"
+      >
+        {{ testError }}
+      </div>
     </section>
   </form>
 </template>
@@ -105,12 +156,17 @@ import {
   Spinner,
 } from '@memoh/ui'
 import ConfirmPopover from '@/components/confirm-popover/index.vue'
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { toTypedSchema } from '@vee-validate/zod'
 import z from 'zod'
 import { useForm } from 'vee-validate'
 import type { ProvidersGetResponse } from '@memoh/sdk'
 import { getProviderLabel } from '@/data/model-catalog'
+interface TestResponse {
+  reachable: boolean
+  latency_ms?: number
+  message?: string
+}
 
 const props = defineProps<{
   provider: Partial<ProvidersGetResponse> | undefined
@@ -122,6 +178,43 @@ const emit = defineEmits<{
   submit: [values: Record<string, unknown>]
   delete: []
 }>()
+
+const testLoading = ref(false)
+const testResult = ref<TestResponse | null>(null)
+const testError = ref('')
+
+async function runTest() {
+  if (!props.provider?.id) return
+  testLoading.value = true
+  testResult.value = null
+  testError.value = ''
+  try {
+    const token = localStorage.getItem('token')
+    const res = await fetch(`/api/providers/${props.provider.id}/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': token ? `Bearer ${token}` : '',
+      },
+    })
+    if (res.ok) {
+      testResult.value = await res.json()
+    } else {
+      const err = await res.text()
+      testError.value = err || 'Test failed'
+    }
+  } catch (err: unknown) {
+    testError.value = err instanceof Error ? err.message : 'Test failed'
+  } finally {
+    testLoading.value = false
+  }
+}
+
+watch(() => props.provider?.id, (newId) => {
+  if (newId) {
+    runTest()
+  }
+}, { immediate: true })
 
 const providerSchema = toTypedSchema(z.object({
   name: z.string().min(1),
@@ -143,7 +236,6 @@ watch(() => props.provider, (newVal) => {
       name: newVal.name,
       base_url: newVal.base_url,
       client_type: newVal.client_type,
-      // Keep key input empty by default so masked placeholders are never submitted back.
       api_key: '',
     })
   }

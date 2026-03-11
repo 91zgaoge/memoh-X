@@ -15,37 +15,42 @@ import (
 // OutboundStream implements channel.OutboundStream for WeCom
 // Supports real-time streaming output using WeCom's stream message format
 type OutboundStream struct {
-	adapter     *Adapter
-	cfg         channel.ChannelConfig
-	wsClient    *WebSocketClient
-	reqID       string
-	chatID      string
-	userID      string
-	logger      *slog.Logger
+	adapter         *Adapter
+	cfg             channel.ChannelConfig
+	wsClient        *WebSocketClient
+	reqID           string
+	chatID          string
+	userID          string
+	logger          *slog.Logger
 
-	buffer      strings.Builder
-	closed      atomic.Bool
-	sent        atomic.Bool
-	streamID    string
-	mu          sync.Mutex
-	lastSentLen int
-	lastSendTime time.Time
-	minInterval  time.Duration
+	buffer          strings.Builder
+	closed          atomic.Bool
+	sent            atomic.Bool
+	streamID        string
+	mu              sync.Mutex
+	lastSentLen     int
+	lastSendTime    time.Time
+	minInterval     time.Duration
+	streamStartTime time.Time // 流式消息开始时间，用于6分钟超时检查
 }
+
+// StreamTimeout 流式消息超时时间（6分钟）
+const StreamTimeout = 6 * time.Minute
 
 // NewOutboundStream creates a new outbound stream
 func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID string, logger *slog.Logger) *OutboundStream {
 	return &OutboundStream{
-		adapter:      adapter,
-		cfg:          cfg,
-		wsClient:     wsClient,
-		reqID:        reqID,
-		chatID:       chatID,
-		userID:       userID,
-		streamID:     generateStreamID(),
-		logger:       logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
-		minInterval:  10 * time.Millisecond,
-		lastSendTime: time.Now(),
+		adapter:         adapter,
+		cfg:             cfg,
+		wsClient:        wsClient,
+		reqID:           reqID,
+		chatID:          chatID,
+		userID:          userID,
+		streamID:        generateStreamID(),
+		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
+		minInterval:     100 * time.Millisecond, // 100ms interval for smooth streaming
+		lastSendTime:    time.Now(),
+		streamStartTime: time.Now(), // 记录流式消息开始时间，用于6分钟超时检查
 	}
 }
 
@@ -63,6 +68,21 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 		s.logger.Debug("stream status", slog.String("status", string(event.Status)))
 
 	case channel.StreamEventDelta:
+		// Check for 6-minute timeout
+		if time.Since(s.streamStartTime) > StreamTimeout {
+			s.logger.Warn("stream timeout: exceeding 6 minute limit, forcing finish",
+				slog.Duration("elapsed", time.Since(s.streamStartTime)))
+			// Send final response with timeout message
+			s.mu.Lock()
+			content := s.buffer.String()
+			if content == "" {
+				content = "处理超时，请稍后再试。"
+			}
+			s.mu.Unlock()
+			s.closed.Store(true)
+			return s.sendStreamUpdate(ctx, content, true)
+		}
+
 		s.mu.Lock()
 		s.buffer.WriteString(event.Delta)
 		currentContent := s.buffer.String()
@@ -72,10 +92,11 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			slog.Int("buffer_len", len(currentContent)),
 			slog.Int("delta_len", len(event.Delta)))
 
-		// Send streaming update immediately for low latency
-		// WeCom will overwrite previous messages with same stream ID
-		if err := s.sendStreamUpdate(ctx, currentContent, false); err != nil {
-			s.logger.Warn("failed to send stream update", slog.Any("error", err))
+		// Check if we should send update (rate limiting to avoid 6000 errors)
+		// WeCom requires serial sending per req_id, so we throttle to reduce latency
+		if s.shouldSendUpdate() {
+			// Don't let send errors interrupt the stream, just log them
+			_ = s.sendStreamUpdate(ctx, currentContent, false)
 		}
 
 	case channel.StreamEventFinal:

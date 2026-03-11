@@ -199,7 +199,30 @@ Rules:
 }
 
 func removeCodeBlocks(text string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(text, "```json", ""), "```", "")
+	// Remove code block markers
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "```json", ""), "```", "")
+	// Remove <think> tags and their content (used by some reasoning models)
+	text = removeThinkTags(text)
+	return text
+}
+
+// removeThinkTags removes <think>...</think> tags and their content
+func removeThinkTags(text string) string {
+	for {
+		startIdx := strings.Index(text, "<think>")
+		if startIdx == -1 {
+			break
+		}
+		endIdx := strings.Index(text[startIdx:], "</think>")
+		if endIdx == -1 {
+			// If no closing tag, remove from start to end
+			text = text[:startIdx]
+			break
+		}
+		endIdx += startIdx + len("</think>")
+		text = text[:startIdx] + text[endIdx:]
+	}
+	return strings.TrimSpace(text)
 }
 
 func toJSON(value any) string {

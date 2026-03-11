@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Kxiandaoyan/Memoh-v2/internal/db"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/db/sqlc"
@@ -202,6 +205,153 @@ func (s *Service) CountByClientType(ctx context.Context, clientType ClientType) 
 		return 0, fmt.Errorf("count providers by client type: %w", err)
 	}
 	return count, nil
+}
+
+const probeTimeout = 5 * time.Second
+
+// Test probes the provider's base URL to check reachability.
+func (s *Service) Test(ctx context.Context, id string) (TestResponse, error) {
+	providerID, err := db.ParseUUID(id)
+	if err != nil {
+		return TestResponse{}, err
+	}
+
+	provider, err := s.queries.GetLlmProviderByID(ctx, providerID)
+	if err != nil {
+		return TestResponse{}, fmt.Errorf("get provider: %w", err)
+	}
+
+	baseURL := strings.TrimRight(provider.BaseUrl, "/")
+
+	start := time.Now()
+	reachable, msg := probeReachable(ctx, baseURL)
+	latency := time.Since(start).Milliseconds()
+
+	return TestResponse{
+		Reachable: reachable,
+		LatencyMs: latency,
+		Message:   msg,
+	}, nil
+}
+
+func probeReachable(ctx context.Context, baseURL string) (bool, string) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	if err != nil {
+		return false, err.Error()
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err.Error()
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return true, ""
+}
+
+// ImportModels fetches models from the provider's /v1/models endpoint and imports them
+func (s *Service) ImportModels(ctx context.Context, id string, req ImportModelsRequest) (ImportModelsResponse, error) {
+	providerID, err := db.ParseUUID(id)
+	if err != nil {
+		return ImportModelsResponse{}, err
+	}
+
+	provider, err := s.queries.GetLlmProviderByID(ctx, providerID)
+	if err != nil {
+		return ImportModelsResponse{}, fmt.Errorf("get provider: %w", err)
+	}
+
+	baseURL := strings.TrimRight(provider.BaseUrl, "/")
+	apiKey := provider.ApiKey
+
+	// Fetch models from provider
+	models, err := fetchModelsFromProvider(ctx, baseURL, apiKey)
+	if err != nil {
+		return ImportModelsResponse{}, fmt.Errorf("fetch models: %w", err)
+	}
+
+	var imported []string
+	var errs []string
+
+	for _, modelID := range models {
+		// Skip if model already exists
+		_, err := s.queries.GetModelByModelID(ctx, modelID)
+		if err == nil {
+			continue // Model already exists
+		}
+
+		// Determine model type
+		modelType := "chat"
+		if req.Type != "" {
+			modelType = req.Type
+		}
+
+		// Create model params
+		params := sqlc.CreateModelParams{
+			ModelID:       modelID,
+			LlmProviderID: providerID,
+			Type:          modelType,
+			ContextWindow: 128000,
+		}
+
+		// Try to create the model
+		if _, err := s.queries.CreateModel(ctx, params); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", modelID, err))
+		} else {
+			imported = append(imported, modelID)
+		}
+	}
+
+	return ImportModelsResponse{
+		Imported: len(imported),
+		Models:   imported,
+		Errors:   errs,
+	}, nil
+}
+
+func fetchModelsFromProvider(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	var models []string
+	for _, m := range result.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+
+	return models, nil
 }
 
 // toGetResponse converts a database provider to a response

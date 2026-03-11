@@ -141,6 +141,11 @@ export const system = ({
       '## Attachments\n\n' +
       '### Receive\n\n' +
       'Files user uploaded will added to your workspace, the file path will be included in the message header.\n\n' +
+      '**CRITICAL - Binary File Handling:**\n' +
+      '- Excel files (.xls, .xlsx, .xlsm): Use the `xlsx` skill immediately. DO NOT use the read tool - these are binary files that cannot be read as text.\n' +
+      '- PDF files: Use an appropriate PDF skill if available, or ask the user what they want to know.\n' +
+      '- Word documents (.docx): Use the `docx` skill if available.\n' +
+      '- Images: Analyze directly if the model supports vision, or describe what you see.\n\n' +
       '### Send\n\n' +
       '**For using channel tools**: Add file path to the message header.\n\n' +
       '**For directly request**: Use the following format:\n\n' +
@@ -175,7 +180,19 @@ export const system = ({
     sections.push(
       `## Skills\n\n` +
       `There are ${skills.length} skills available, you can use ${quote('use_skill')} to use a skill.\n` +
-      skillList
+      skillList +
+      '\n\n**When to use skills (CRITICAL - FOLLOW THESE RULES):**\n' +
+      '**Excel/Spreadsheet files (.xls, .xlsx, .xlsm) - READ CAREFULLY:**\n' +
+      '- MANDATORY: Your FIRST action MUST be to use the **xlsx** skill via use_skill tool.\n' +
+      '- NEVER use rag-documents for Excel files - it requires external RAG service that may not be available.\n' +
+      '- NEVER use read tool on Excel files - they are binary formats that cannot be read as text.\n' +
+      '- If you see an Excel file attachment, STOP and use xlsx skill FIRST before doing anything else.\n\n' +
+      '**PDF files:**\n' +
+      '- Use **pdf** skill with use_skill tool if available.\n' +
+      '- Only use rag-documents if pdf skill is not available AND RAG service is confirmed running.\n\n' +
+      '**Word documents (.docx):**\n' +
+      '- Use **docx** skill with use_skill tool if available.\n\n' +
+      '**General rule:** When you receive ANY file attachment that you cannot directly read as plain text, use the appropriate skill immediately rather than attempting direct file reads.'
     )
   }
 

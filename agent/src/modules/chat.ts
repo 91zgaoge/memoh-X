@@ -74,6 +74,7 @@ export const chatModule = new Elysia({ prefix: '/chat' })
   })
   .post('/stream', async function* ({ body, bearer }) {
     try {
+      console.log('[Agent Stream] Received request:', { query: body.query?.slice(0, 200), messageCount: body.messages?.length, attachmentCount: body.attachments?.length, attachments: body.attachments?.map((a: any) => ({ type: a.type, path: a.path, base64Length: a.base64?.length })) })
       const authFetcher = createAuthFetcher(bearer)
       const { stream } = createAgent(buildAgentParams(body, bearer!), authFetcher)
       for await (const action of stream({
@@ -118,18 +119,22 @@ export const chatModule = new Elysia({ prefix: '/chat' })
   .post('/summarize', async ({ body }) => {
     const mc = body.model as ModelConfig
     const model = createModel(mc)
-    const messages = SYSTEM_SAFE_PROVIDERS.has(mc.clientType)
-      ? body.messages
-      : body.messages.map((m: any) => m.role === 'system' ? { ...m, role: 'user' } : m)
-    const { text, usage } = await generateText({
-      model,
-      system: [
+    // Build messages with system message at the beginning (required by Jinja template processing)
+    const systemMessage = {
+      role: 'system' as const,
+      content: [
         'You are a precise conversation summarizer.',
         'Produce a concise summary of the conversation below.',
         'Preserve: key facts, user preferences, decisions made, action items, and important context.',
         'Omit: greetings, filler, tool call details, and redundant exchanges.',
         'Output ONLY the summary text, no preamble.',
       ].join('\n'),
+    }
+    const messages = SYSTEM_SAFE_PROVIDERS.has(mc.clientType)
+      ? [systemMessage, ...body.messages]
+      : [systemMessage, ...body.messages.map((m: any) => m.role === 'system' ? { ...m, role: 'user' } : m)]
+    const { text, usage } = await generateText({
+      model,
       messages,
     })
     return {

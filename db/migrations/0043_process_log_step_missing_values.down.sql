@@ -1,0 +1,4 @@
+-- 0043_process_log_step_missing_values
+-- Down migration: Remove the added enum values
+-- Note: PostgreSQL does not support removing enum values directly
+-- This is a placeholder for completeness

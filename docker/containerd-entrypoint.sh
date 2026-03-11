@@ -2,6 +2,49 @@
 
 MCP_IMAGE="${MCP_IMAGE:-docker.io/library/memoh-mcp:latest}"
 
+# Setup CNI configuration
+mkdir -p /etc/cni/net.d /opt/cni/bin
+
+# Install CNI plugins if available
+if [ -d /usr/lib/cni ]; then
+    cp -a /usr/lib/cni/* /opt/cni/bin/ 2>/dev/null || true
+fi
+if [ -d /usr/libexec/cni ]; then
+    cp -a /usr/libexec/cni/* /opt/cni/bin/ 2>/dev/null || true
+fi
+
+# Create CNI network config if not exists
+if [ ! -f /etc/cni/net.d/10-memoh.conflist ]; then
+cat > /etc/cni/net.d/10-memoh.conflist << 'EOF'
+{
+  "cniVersion": "1.0.0",
+  "name": "memoh-cni",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "cni0",
+      "isGateway": true,
+      "ipMasq": true,
+      "promiscMode": true,
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[
+          { "subnet": "10.88.0.0/16" }
+        ]],
+        "routes": [
+          { "dst": "0.0.0.0/0" }
+        ]
+      }
+    },
+    {
+      "type": "portmap",
+      "capabilities": { "portMappings": true }
+    }
+  ]
+}
+EOF
+fi
+
 # Start containerd in background
 mkdir -p /run/containerd
 containerd &

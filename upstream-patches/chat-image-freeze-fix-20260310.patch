@@ -1,0 +1,56 @@
+diff --git a/apps/web/src/pages/chat/components/attachment-block.vue b/apps/web/src/pages/chat/components/attachment-block.vue
+index 8b3338e8..62ad8672 100644
+--- a/apps/web/src/pages/chat/components/attachment-block.vue
++++ b/apps/web/src/pages/chat/components/attachment-block.vue
+@@ -16,7 +16,9 @@
+           :src="getUrl(att)"
+           :alt="String(att.name ?? 'image')"
+           class="w-full h-full object-contain pointer-events-none"
+-          loading="lazy"
++          loading="eager"
++          width="192"
++          height="192"
+         >
+         <video
+           v-else
+diff --git a/apps/web/src/router.ts b/apps/web/src/router.ts
+index cdb97018..b217bcf5 100644
+--- a/apps/web/src/router.ts
++++ b/apps/web/src/router.ts
+@@ -133,6 +133,21 @@ const router = createRouter({
+   history: createWebHistory(),
+   routes,
+ })
++
++// Handle chunk load errors (e.g. user aborted refresh, network failure, new deployment)
++router.onError((error) => {
++  const isChunkLoadError =
++    error.message.includes('Failed to fetch dynamically imported module') ||
++    error.message.includes('Importing a module script failed') ||
++    error.message.includes('error loading dynamically imported module')
++  if (isChunkLoadError) {
++    console.warn('[Router] Chunk load failed, reloading...', error.message)
++    window.location.reload()
++    return
++  }
++  throw error
++})
++
+ router.beforeEach((to) => {
+   const token = localStorage.getItem('token')
+ 
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 24730fb1..2c61cd3a 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -39,6 +39,10 @@ export default defineConfig(({ command }) => {
+ 
+   return {
+     plugins: [vue(), tailwindcss()],
++    optimizeDeps: {
++      // Pre-bundle deps for route pages to avoid slow first load / navigation
++      entries: ['src/main.ts', 'src/pages/**/*.vue'],
++    },
+     server: {
+       port,
+       host,
