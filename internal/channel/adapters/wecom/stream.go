@@ -31,9 +31,12 @@ type OutboundStream struct {
 	streamID        string
 	mu              sync.Mutex
 	lastSentLen     int
-	lastSendTime    time.Time
-	minInterval     time.Duration
 	streamStartTime time.Time // 流式消息开始时间，用于6分钟超时检查
+
+	// Buffered sending mechanism
+	ticker          *time.Ticker
+	stopTicker      chan struct{}
+	pendingSend     atomic.Bool
 }
 
 // StreamTimeout 流式消息超时时间（6分钟）
@@ -42,13 +45,17 @@ const StreamTimeout = 6 * time.Minute
 // MaxContentBytes 单条消息最大字节数（企业微信 AI Bot SDK 限制：20480 字节）
 const MaxContentBytes = 20480
 
+// SendInterval 流式消息发送间隔（合并多个delta后批量发送）
+const SendInterval = 300 * time.Millisecond // 300ms合并发送一次
+
 // NewOutboundStream creates a new outbound stream
 func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger) *OutboundStream {
 	// If no streamID provided, generate a new one
 	if streamID == "" {
 		streamID = generateStreamID()
 	}
-	return &OutboundStream{
+
+	s := &OutboundStream{
 		adapter:         adapter,
 		cfg:             cfg,
 		wsClient:        wsClient,
@@ -59,9 +66,49 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		isMentioned:     isMentioned,
 		streamID:        streamID,
 		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
-		minInterval:     500 * time.Millisecond, // 500ms interval to avoid rate limiting (30 msg/min = 2s/msg, use half for safety)
-		lastSendTime:    time.Now(),
-		streamStartTime: time.Now(), // 记录流式消息开始时间，用于6分钟超时检查
+		streamStartTime: time.Now(),
+		stopTicker:      make(chan struct{}),
+	}
+
+	// Start background ticker for buffered sending
+	s.ticker = time.NewTicker(SendInterval)
+	go s.sendLoop()
+
+	return s
+}
+
+// sendLoop runs in background to send buffered content periodically
+func (s *OutboundStream) sendLoop() {
+	for {
+		select {
+		case <-s.ticker.C:
+			s.flushBuffer()
+		case <-s.stopTicker:
+			s.ticker.Stop()
+			return
+		}
+	}
+}
+
+// flushBuffer sends the current buffer content if there's anything new
+func (s *OutboundStream) flushBuffer() {
+	if s.closed.Load() {
+		return
+	}
+
+	s.mu.Lock()
+	content := s.buffer.String()
+	s.mu.Unlock()
+
+	// Only send if there's new content since last send
+	if len(content) > s.lastSentLen {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// Don't let send errors stop the stream
+		if err := s.sendStreamUpdate(ctx, content, false); err != nil {
+			s.logger.Debug("buffered send failed", slog.Any("error", err))
+		}
 	}
 }
 
@@ -91,26 +138,21 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			}
 			s.mu.Unlock()
 			s.closed.Store(true)
+			close(s.stopTicker)
 			return s.sendStreamUpdate(ctx, content, true)
 		}
 
 		s.mu.Lock()
 		s.buffer.WriteString(event.Delta)
-		currentContent := s.buffer.String()
 		s.mu.Unlock()
 
-		s.logger.Debug("stream delta",
-			slog.Int("buffer_len", len(currentContent)),
+		s.logger.Debug("stream delta buffered",
 			slog.Int("delta_len", len(event.Delta)))
 
-		// Check if we should send update (rate limiting to avoid 6000 errors)
-		// WeCom requires serial sending per req_id, so we throttle to reduce latency
-		if s.shouldSendUpdate() {
-			// Don't let send errors interrupt the stream, just log them
-			_ = s.sendStreamUpdate(ctx, currentContent, false)
-		}
-
 	case channel.StreamEventFinal:
+		// Stop the ticker first
+		close(s.stopTicker)
+
 		var finalContent string
 		if event.Final != nil && event.Final.Message.Text != "" {
 			finalContent = event.Final.Message.Text
@@ -128,6 +170,9 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 		return s.sendStreamUpdate(ctx, finalContent, true)
 
 	case channel.StreamEventError:
+		// Stop the ticker
+		close(s.stopTicker)
+
 		errorMsg := event.Error
 		if errorMsg == "" {
 			errorMsg = "处理消息时出错，请稍后再试。"
@@ -149,18 +194,6 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 	}
 
 	return nil
-}
-
-// shouldSendUpdate checks if enough time has passed since last send
-func (s *OutboundStream) shouldSendUpdate() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now()
-	if now.Sub(s.lastSendTime) >= s.minInterval {
-		return true
-	}
-	return false
 }
 
 // sendStreamUpdate sends a stream update to WeCom
@@ -343,7 +376,6 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 	}
 
 	s.mu.Lock()
-	s.lastSendTime = time.Now()
 	s.lastSentLen = len(content)
 	s.mu.Unlock()
 
@@ -356,6 +388,14 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 		return nil
 	}
 	s.closed.Store(true)
+
+	// Stop the ticker
+	select {
+	case <-s.stopTicker:
+		// Already closed
+	default:
+		close(s.stopTicker)
+	}
 
 	s.mu.Lock()
 	content := s.buffer.String()
