@@ -1,12 +1,12 @@
-# Comprehensive Comparison with OpenClaw (42 Items)
+# Comprehensive Comparison with OpenClaw (46 Items)
 
 > Back to [Documentation](./README.md) · [Project Home](../README_EN.md)
 
 ---
 
-> Result column: **M** = Memoh-v2 wins · **O** = OpenClaw wins · **=** = Tied
+> Result column: **M** = Memoh-X wins · **O** = OpenClaw wins · **=** = Tied
 
-| # | Dimension | Memoh-v2 | OpenClaw | Result |
+| # | Dimension | Memoh-X | OpenClaw | Result |
 |---|---|---|---|:---:|
 | 1 | Backend Language | Go (high concurrency, compiled) | Node.js (single-threaded, interpreted) | **M** |
 | 2 | Architecture | Three-service split (Server / Gateway / Web) | Monolithic application | **M** |
@@ -38,18 +38,53 @@
 | 28 | Self-Healing | Auto-detect stale tasks + force re-run + report to user | HEARTBEAT.md manual config | **M** |
 | 29 | Management UI | Full Web UI (10+ modules) | Control UI + CLI + TUI combo | **M** |
 | 30 | Multi-User | Native multi-member + role permissions (admin/member) | Single-user | **M** |
-| 31 | Platform Coverage | Telegram, Lark, Web chat, CLI | Telegram, Discord, WhatsApp, Slack, Teams, Signal, iMessage, etc. 12+ | **O** |
-| 32 | Token Usage | Per-response display + Dashboard charts + multi-bot comparison | /usage command query | **M** |
-| 33 | Bot File Management | Web UI online view/edit | Local filesystem + Git auto-init | **M** |
-| 34 | Auth Security | JWT + multi-user permission system | Gateway Token + Pairing Code | **M** |
-| 35 | Snapshots / Rollback | containerd snapshots + version rollback | Git version control | **M** |
-| 36 | Search Engines | Configurable multiple engines (Brave / SerpAPI) | Brave Search only | **M** |
-| 37 | Frontend i18n | Full Chinese + English i18n | English primary, partial Chinese docs | **M** |
-| 38 | Voice / TTS | None | Voice Wake + Talk Mode + ElevenLabs TTS | **O** |
-| 39 | Visual Canvas | None | Canvas + A2UI interactive workspace | **O** |
-| 40 | Companion Apps | None | macOS + iOS + Android native apps | **O** |
-| 41 | Webhook / Email | None | Webhook + Gmail Pub/Sub | **O** |
-| 42 | Model Failover | Fallback model auto-failover (sync + stream) | Automatic model failover | **=** |
-| 43 | Model Routing | Background model routing (heartbeat/schedule/subagent use cheaper model) + 3-tier prompts + smart memory gate | None (single model for all tasks) | **M** |
+| 31 | Platform Coverage | Telegram, Lark, **WeCom**, **QQ Channel**, Discord, Web chat, CLI | Telegram, Discord, WhatsApp, Slack, Teams, Signal, iMessage, etc. 12+ | **M** |
+| 32 | **WeCom Support** | **WebSocket real-time + "Thinking..." instant reply + streaming** | None | **M** |
+| 33 | **QQ Channel Support** | **Official Bot API + WebSocket events** | None | **M** |
+| 34 | **Instant Reply Mechanism** | **WeCom "Thinking..." immediate feedback** | Discord Typing indicator | **M** |
+| 35 | Token Usage | Per-response display + Dashboard charts + multi-bot comparison | /usage command query | **M** |
+| 36 | Bot File Management | Web UI online view/edit | Local filesystem + Git auto-init | **M** |
+| 37 | Auth Security | JWT + multi-user permission system | Gateway Token + Pairing Code | **M** |
+| 38 | Snapshots / Rollback | containerd snapshots + version rollback | Git version control | **M** |
+| 39 | Search Engine | **SearXNG self-hosted + multi-engine config** | Brave Search only | **M** |
+| 40 | Frontend i18n | Full Chinese + English i18n | English primary, partial Chinese docs | **M** |
+| 41 | Voice / TTS | None | Voice Wake + Talk Mode + ElevenLabs TTS | **O** |
+| 42 | Visual Canvas | None | Canvas + A2UI interactive workspace | **O** |
+| 43 | Companion Apps | None | macOS + iOS + Android native apps | **O** |
+| 44 | Webhook / Email | None | Webhook + Gmail Pub/Sub | **O** |
+| 45 | Model Failover | Fallback model auto-failover (sync + stream) | Automatic model failover | **=** |
+| 46 | Model Routing | Background model routing (heartbeat/schedule/subagent use cheaper model) + 3-tier prompts + smart memory gate | None (single model for all tasks) | **M** |
 
-**Summary: Memoh-v2 wins 28 · OpenClaw wins 8 · Tied 7**
+**Summary: Memoh-X wins 33 · OpenClaw wins 7 · Tied 6**
+
+---
+
+## Detailed Explanations
+
+### WeCom (Enterprise WeChat) Adapter (Memoh-X Exclusive)
+
+Memoh-X features a newly developed WeCom adapter with the following capabilities:
+
+| Feature | Description |
+|---------|-------------|
+| WebSocket Real-time | Based on WeCom WebSocket API for low-latency messaging |
+| "Thinking..." Instant Reply | Returns "Thinking..." within 500ms after receiving message for better UX |
+| Streaming Output | Supports streaming responses for real-time AI content generation |
+| Smart Rate Limiting | Built-in 30 msg/min and 1000 msg/hour limits to avoid API throttling |
+| Message Types | Text, images, Markdown, cards, and more |
+
+### QQ Channel Adapter (Memoh-X Exclusive)
+
+Based on QQ's official Bot API, supporting:
+
+- WebSocket event reception (messages, member changes, etc.)
+- Message sending and emoji reactions
+- Channel member management
+- Auto-reconnection and heartbeat keepalive
+
+### Zero-Cost Search (Memoh-X Exclusive)
+
+Memoh-X includes SearXNG meta-search engine, no API Key required:
+- Aggregates Google, Bing, DuckDuckGo, and more
+- Completely free, no usage limits
+- Docker Compose one-click deployment
