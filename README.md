@@ -434,7 +434,7 @@ Bot 不是静态的 prompt，而是会成长的智能体：
 
 ## 🤝 致谢
 
-本项目基于 [Memoh-v2](https://github.com/Kxiandaoyan/Memoh-v2) 二次开发，感谢原作者的优秀工作。
+本项目基于 [Memoh](https://github.com/memohai/Memoh) 和 [Memoh-v2](https://github.com/Kxiandaoyan/Memoh-v2) 二次开发，感谢原作者的优秀工作。
 
 ---
 

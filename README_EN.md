@@ -204,4 +204,4 @@ This project extends [Memoh](https://github.com/memohai/Memoh) with significant 
 
 ## Acknowledgments
 
-This project is a secondary development based on [Memoh-v2](https://github.com/Kxiandaoyan/Memoh-v2). Thanks to the original authors for their excellent work.
+This project is a secondary development based on [Memoh](https://github.com/memohai/Memoh) and [Memoh-v2](https://github.com/Kxiandaoyan/Memoh-v2). Thanks to the original authors for their excellent work.
