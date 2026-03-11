@@ -161,13 +161,6 @@ func (s *OutboundStream) shouldSendUpdate() bool {
 
 // sendStreamUpdate sends a stream update to WeCom
 func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, finish bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.wsClient == nil {
-		return fmt.Errorf("websocket client is nil")
-	}
-
 	// Don't send empty content unless it's the final message
 	if content == "" && !finish {
 		return nil
@@ -177,6 +170,7 @@ func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, f
 	contentBytes := []byte(content)
 	if len(contentBytes) > MaxContentBytes {
 		// Content too long, need to split and send in chunks
+		// Note: sendSplitContent handles its own locking
 		return s.sendSplitContent(ctx, content, finish)
 	}
 
@@ -184,14 +178,20 @@ func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, f
 	return s.sendSingleUpdate(ctx, content, finish)
 }
 
-// sendSplitContent splits long content into multiple messages and sends them sequentially
+// sendSplitContent splits long content into multiple messages and sends them sequentially.
+// CRITICAL: All chunks must use the SAME streamID and reqID as the original message.
+// WeCom identifies a stream sequence by (req_id, stream.id) pair.
 func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, finish bool) error {
 	chunks := splitContentByBytes(content, MaxContentBytes-100) // Reserve space for continuation indicator
 
 	s.logger.Info("splitting long content into chunks",
 		slog.Int("total_chunks", len(chunks)),
-		slog.Int("total_bytes", len(content)))
+		slog.Int("total_bytes", len(content)),
+		slog.String("stream_id", s.streamID),
+		slog.String("req_id", s.reqID))
 
+	// IMPORTANT: Use the original streamID for all chunks
+	// This ensures WeCom recognizes them as the same stream sequence
 	for i, chunk := range chunks {
 		isLastChunk := (i == len(chunks)-1)
 
@@ -200,17 +200,84 @@ func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, f
 			chunk = chunk + "\n\n...(继续)"
 		}
 
-		// Last chunk uses the passed finish value, others use false
+		// For split content:
+		// - Intermediate chunks: finish=false (fire-and-forget, no ACK wait)
+		// - Last chunk: use the original finish value (if true, wait for ACK)
 		chunkFinish := isLastChunk && finish
 
-		if err := s.sendSingleUpdate(ctx, chunk, chunkFinish); err != nil {
+		s.logger.Debug("sending chunk",
+			slog.Int("chunk_index", i+1),
+			slog.Int("total_chunks", len(chunks)),
+			slog.Bool("is_last", isLastChunk),
+			slog.Bool("finish", chunkFinish),
+			slog.Int("content_bytes", len(chunk)))
+
+		if err := s.sendChunk(ctx, chunk, chunkFinish); err != nil {
+			s.logger.Error("failed to send chunk",
+				slog.Int("chunk_index", i+1),
+				slog.Any("error", err))
 			return fmt.Errorf("send chunk %d/%d: %w", i+1, len(chunks), err)
 		}
 
 		// Add delay between chunks to avoid rate limiting
+		// WeCom limit: 30 messages/minute
 		if !isLastChunk {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 		}
+	}
+
+	s.logger.Info("all chunks sent successfully",
+		slog.Int("total_chunks", len(chunks)),
+		slog.String("stream_id", s.streamID))
+
+	return nil
+}
+
+// sendChunk sends a single chunk using the original streamID
+func (s *OutboundStream) sendChunk(ctx context.Context, content string, finish bool) error {
+	s.mu.Lock()
+
+	if s.wsClient == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("websocket client is nil")
+	}
+
+	wsClient := s.wsClient
+	streamID := s.streamID
+	reqID := s.reqID
+	chatType := s.chatType
+	isMentioned := s.isMentioned
+
+	s.mu.Unlock()
+
+	// Send stream update using WeCom stream format
+	body := StreamMsgBody{
+		MsgType: MsgTypeStream,
+		Stream: StreamResponse{
+			ID:      streamID, // Use the original streamID!
+			Finish:  finish,
+			Content: content,
+		},
+	}
+
+	// Determine which command to use based on chat type and mention status
+	cmd := CmdRespondMsg
+	if chatType == "group" && !isMentioned {
+		cmd = CmdSendMsg
+	}
+
+	// Use SendStream for all chunks:
+	// - finish=false: fire-and-forget, returns immediately
+	// - finish=true: waits for ACK (only for the final chunk)
+	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+		return fmt.Errorf("send chunk: %w", err)
+	}
+
+	if finish {
+		s.sent.Store(true)
+		s.logger.Info("final chunk sent successfully",
+			slog.String("stream_id", streamID),
+			slog.Int("content_bytes", len(content)))
 	}
 
 	return nil
@@ -218,8 +285,23 @@ func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, f
 
 // sendSingleUpdate sends a single stream update to WeCom
 func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, finish bool) error {
+	s.mu.Lock()
+
+	if s.wsClient == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("websocket client is nil")
+	}
+
+	wsClient := s.wsClient
+	streamID := s.streamID
+	reqID := s.reqID
+	chatType := s.chatType
+	isMentioned := s.isMentioned
+
+	s.mu.Unlock()
+
 	s.logger.Debug("sending stream update",
-		slog.String("stream_id", s.streamID),
+		slog.String("stream_id", streamID),
 		slog.Int("content_bytes", len(content)),
 		slog.Bool("finish", finish))
 
@@ -227,7 +309,7 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 	body := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
-			ID:      s.streamID,
+			ID:      streamID,
 			Finish:  finish,
 			Content: content,
 		},
@@ -238,35 +320,32 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 	// - 群聊且被@ (group + isMentioned): use CmdRespondMsg (reply to the mention)
 	// - 群聊未被@ (group + !isMentioned): use CmdSendMsg (proactive send)
 	cmd := CmdRespondMsg
-	if s.chatType == "group" && !s.isMentioned {
+	if chatType == "group" && !isMentioned {
 		cmd = CmdSendMsg
 		s.logger.Debug("using proactive send for group message without mention",
-			slog.String("chat_type", s.chatType),
-			slog.Bool("is_mentioned", s.isMentioned))
+			slog.String("chat_type", chatType),
+			slog.Bool("is_mentioned", isMentioned))
 	}
 
-	// Use fast path for streaming (no ACK wait) to improve latency
-	// Intermediate updates use async SendStream for low latency
-	// Final message uses SendReply to ensure delivery (waits for ACK)
+	// Use SendStream for all messages - it handles ACK waiting based on finish flag
+	// - finish=false: fire-and-forget for low latency
+	// - finish=true: waits for ACK to ensure delivery
+	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+		return fmt.Errorf("send stream update: %w", err)
+	}
+
 	if finish {
-		// Final message - use SendReply which waits for ACK to ensure delivery
-		if err := s.wsClient.SendReply(ctx, s.reqID, body, cmd); err != nil {
-			return fmt.Errorf("send stream response: %w", err)
-		}
 		s.sent.Store(true)
 		s.logger.Info("final stream response sent successfully",
-			slog.String("stream_id", s.streamID),
+			slog.String("stream_id", streamID),
 			slog.String("cmd", cmd),
 			slog.Int("content_bytes", len(content)))
-	} else {
-		// Intermediate update - use SendStream for low latency
-		if err := s.wsClient.SendStream(ctx, s.reqID, body, cmd); err != nil {
-			return fmt.Errorf("send stream update: %w", err)
-		}
 	}
 
+	s.mu.Lock()
 	s.lastSendTime = time.Now()
 	s.lastSentLen = len(content)
+	s.mu.Unlock()
 
 	return nil
 }
