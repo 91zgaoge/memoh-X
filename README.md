@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>🧠 Memoh-v2</h1>
+<h1>🧠 Memoh-X</h1>
 
 **真隔离 · 真记忆 · 真进化 · 真协作 —— 不妥协的 AI Agent 平台**
 
@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/91zgaoge/memoh-X/main/scripts/insta
 
 ```bash
 git clone --depth 1 https://github.com/91zgaoge/memoh-X.git
-cd Memoh-v2
+cd memoh-X
 docker compose up -d
 ```
 
@@ -434,7 +434,7 @@ Bot 不是静态的 prompt，而是会成长的智能体：
 
 ## 🤝 致谢
 
-本项目基于 [Memoh](https://github.com/memohai/Memoh) 二次开发，感谢原作者的优秀工作。
+本项目基于 [Memoh-v2](https://github.com/Kxiandaoyan/Memoh-v2) 二次开发，感谢原作者的优秀工作。
 
 ---
 

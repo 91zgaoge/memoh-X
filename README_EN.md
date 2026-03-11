@@ -1,6 +1,6 @@
 <div align="center">
 
-# Memoh-v2
+# Memoh-X
 
 **Real Isolation · Real Memory · Real Evolution — The Uncompromising AI Agent Platform**
 
@@ -33,7 +33,7 @@ Or manually:
 
 ```bash
 git clone --depth 1 https://github.com/91zgaoge/memoh-X.git
-cd Memoh-v2
+cd memoh-X
 docker compose up -d
 ```
 
@@ -204,4 +204,4 @@ This project extends [Memoh](https://github.com/memohai/Memoh) with significant 
 
 ## Acknowledgments
 
-This project is a secondary development based on [Memoh](https://github.com/memohai/Memoh). Thanks to the original authors for their excellent work.
+This project is a secondary development based on [Memoh-v2](https://github.com/Kxiandaoyan/Memoh-v2). Thanks to the original authors for their excellent work.
