@@ -4,13 +4,10 @@
       <h4 class="scroll-m-20 font-semibold tracking-tight">
         {{ $t('models.title') }}
       </h4>
-      <div
+      <CreateModel
         v-if="providerId"
-        class="flex items-center gap-2 ml-auto"
-      >
-        <ImportModelsDialog :provider-id="providerId" />
-        <CreateModel :id="providerId" />
-      </div>
+        :id="providerId"
+      />
     </section>
 
     <template v-if="models && models.length > 0">
@@ -102,7 +99,6 @@ import {
   InputGroupInput,
 } from '@memoh/ui'
 import CreateModel from '@/components/create-model/index.vue'
-import ImportModelsDialog from '@/components/import-models-dialog/index.vue'
 import ModelItem from './model-item.vue'
 import type { ModelsGetResponse } from '@memoh/sdk'
 
