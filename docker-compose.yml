@@ -67,6 +67,7 @@ services:
     container_name: memoh-containerd
     privileged: true
     pid: host
+    cgroup: host
     volumes:
       - containerd_sock:/run/containerd
       - containerd_data:/var/lib/containerd

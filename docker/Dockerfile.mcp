@@ -3,6 +3,9 @@ FROM golang:1.25-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
+ARG http_proxy
+ARG https_proxy
+ENV GOPROXY=https://goproxy.cn,direct
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
@@ -14,39 +17,43 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags "-s -w -X github.com/Kxiandaoyan/Memoh-v2/internal/version.CommitHash=${COMMIT_HASH}" -o /out/mcp ./cmd/mcp
 
-FROM alpine:latest
+FROM python:3.10-slim-bookworm
 
 ARG TZ=UTC
 ENV TZ=${TZ}
 
 # Base utilities + dumb-init (PID 1 init system to reap zombie processes)
-RUN apk add --no-cache grep curl bash tzdata gcompat dumb-init \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    grep curl bash tzdata dumb-init \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
-    && echo "${TZ}" > /etc/timezone
+    && echo "${TZ}" > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
 # Node.js + npm (provides npx for JS/TS MCP servers)
-RUN apk add --no-cache nodejs npm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
 
 # Chromium + xvfb + dependencies (headless browser for agent-browser)
-RUN apk add --no-cache chromium libstdc++ harfbuzz nss freetype xvfb-run
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium libstdc++6 libharfbuzz0b libnss3 libfreetype6 xvfb \
+    && rm -rf /var/lib/apt/lists/*
 
 # ClawHub CLI + agent-browser + actionbook (skills + browser + web operation manuals)
 RUN npm install -g clawhub agent-browser @actionbookdev/cli
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Python 3 + pip + uv (provides uvx for Python MCP servers)
-RUN apk add --no-cache python3 py3-pip && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh && \
+# uv for Python MCP servers
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     ln -sf /root/.local/bin/uv /usr/local/bin/uv && \
     ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 
 # OpenViking context database (optional, enabled per-bot)
-# Needs build toolchain: Go+make for AGFS server, gcc/g++/cmake for pybind11 C++ extensions
-RUN apk add --no-cache --virtual .ov-build-deps \
-        go make gcc g++ musl-dev python3-dev cmake git && \
-    pip install --break-system-packages openviking && \
-    apk del .ov-build-deps
+# Install openviking with all dependencies
+ARG http_proxy
+ARG https_proxy
+RUN pip install --no-cache-dir openviking
 
 WORKDIR /app
 COPY --from=build /out/mcp /opt/mcp

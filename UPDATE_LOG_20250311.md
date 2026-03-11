@@ -285,5 +285,219 @@ memoh-containerd Up (healthy)
 
 ---
 
-*文档生成时间: 2026-03-11*
+## 十、系统维护修复 (Claude Code)
+
+### 10.1 数据库枚举修复
+
+**问题:** `process_log_step` 枚举缺少 `trigger_started` 值
+**错误信息:** `ERROR: invalid input value for enum process_log_step: "trigger_started"`
+**修复:** 创建迁移文件 `db/migrations/0044_add_trigger_started_enum.up.sql`
+
+```sql
+ALTER TYPE process_log_step ADD VALUE IF NOT EXISTS 'trigger_started';
+```
+
+### 10.2 健康检查脚本修复
+
+**问题:** 脚本检查 `wework.jxtvnet.com:8090/webhooks/wecom`，但服务实际运行在 `localhost:8080`
+**修复:** 更新 `/root/check_memoh_health.sh`
+
+```bash
+# 修改前
+WEBHOOK_URL="http://wework.jxtvnet.com:8090/webhooks/wecom"
+
+# 修改后
+HEALTH_URL="http://localhost:8080/health"
+```
+
+### 10.3 LLM 服务网络修复
+
+**问题:** Docker 容器无法访问 `10.62.239.13`
+**修复:** 更新 LLM Provider 配置使用 Docker 网关 `172.17.0.1`
+
+| Provider | 原配置 | 新配置 |
+|----------|--------|--------|
+| qwen3.5-35B-A3B | 10.62.239.13:17099 | 172.17.0.1:17099 |
+| qwen3.5-27B | 10.62.239.13:17100 | 172.17.0.1:17099 |
+| Embedding | 10.62.239.13:8089 | 172.17.0.1:8089 |
+
+### 10.4 SearXNG 联网搜索修复
+
+**问题:** SearXNG 容器无法访问外网，所有搜索引擎超时
+**修复:** 配置 HTTP 代理
+
+**修改文件:** `docker/config/searxng-settings.yml`
+
+```yaml
+outgoing:
+  proxies:
+    http:
+      - http://ccd:88152353@10.71.252.4:10810
+    https:
+      - http://ccd:88152353@10.71.252.4:10810
+```
+
+**验证:**
+```bash
+docker exec memoh-server wget -qO- "http://searxng:8080/search?q=test&format=json"
+```
+
+### 10.5 27B 模型服务管理
+
+**创建服务:** `/etc/systemd/system/llama-qwen27.service`
+**运行模式:** CPU (GPU 被 35B 占用)
+**端口:** 17100
+**状态:** 已停止 (用户选择使用 35B 模型)
+
+```bash
+# 管理服务
+systemctl start llama-qwen27.service   # 启动
+systemctl stop llama-qwen27.service    # 停止
+```
+
+### 10.6 系统代理配置
+
+**Docker 代理:** `/etc/systemd/system/docker.service.d/http-proxy.conf`
+```
+HTTP_PROXY=http://ccd:88152353@10.71.252.4:10810
+HTTPS_PROXY=http://ccd:88152353@10.71.252.4:10810
+NO_PROXY=localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
+```
+
+**Proxychains:** `/etc/proxychains.conf`
+```
+socks5 10.40.31.69 10810 ccd 88152353
+```
+
+### 10.7 服务端口汇总
+
+| 服务 | 端口 | 类型 | 状态 |
+|------|------|------|------|
+| llama-qwen35 | 17099 | GPU | ✅ 运行中 |
+| llama-qwen27 | 17100 | CPU | ❌ 已停止 |
+| llama-embedding | 8089 | GPU | ✅ 运行中 |
+| memoh-server | 8080 | API | ✅ 运行中 |
+| memoh-agent | 8081 | Gateway | ✅ 运行中 |
+| memoh-web | 8082 | Web UI | ✅ 运行中 |
+| memoh-searxng | 8080 | 搜索 | ✅ 运行中 |
+
+### 10.8 常用维护命令
+
+```bash
+# 健康检查
+curl http://localhost:8080/health
+cat /var/log/memoh-health.log | tail -5
+
+# 重启 memoh
+cd /data2/memoh-v2 && docker compose restart
+
+# 查看日志
+docker logs memoh-server --tail 50
+docker logs memoh-agent --tail 50
+docker logs memoh-searxng --tail 20
+
+# 检查 LLM 服务
+curl http://localhost:17099/health
+curl http://localhost:8089/health
+
+# 测试搜索
+docker exec memoh-server wget -qO- "http://searxng:8080/search?q=test&format=json"
+```
+
+### 10.9 OpenViking 数据库修复
+
+**问题:** 所有 Bot 容器中的 OpenViking 数据库无法正常工作
+**错误信息:** `ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'`
+
+**根本原因:**
+1. MCP 镜像基于 `python:3.10-alpine` 构建，但实际运行环境缺少 openviking 包
+2. 之前尝试修复时安装了 Python 3.12 版本的 openviking，但 pydantic_core 编译模块与 Python 3.10 不兼容
+3. containerd 容器使用私有 cgroup 命名空间，导致无法创建子容器
+
+**修复步骤:**
+
+#### 1. 修改 MCP Dockerfile
+
+**文件:** `docker/Dockerfile.mcp`
+
+```dockerfile
+# 修改基础镜像从 alpine 到 debian slim
+FROM python:3.10-slim-bookworm
+
+# ... 其他安装步骤 ...
+
+# 安装 openviking (在构建时通过代理下载)
+ARG http_proxy
+ARG https_proxy
+RUN pip install --no-cache-dir openviking
+```
+
+#### 2. 修改 containerd 配置
+
+**文件:** `docker-compose.yml`
+
+```yaml
+containerd:
+  # ... 其他配置 ...
+  privileged: true
+  pid: host
+  cgroup: host  # 新增: 解决 cgroup v2 嵌套容器问题
+```
+
+#### 3. 重建 MCP 镜像
+
+```bash
+# 使用代理构建镜像
+export http_proxy=http://ccd:88152353@10.71.252.4:10810
+export https_proxy=http://ccd:88152353@10.71.252.4:10810
+
+docker build \
+  --build-arg http_proxy=$http_proxy \
+  --build-arg https_proxy=$https_proxy \
+  -f docker/Dockerfile.mcp \
+  -t memoh-mcp:latest .
+
+# 导出并导入到 containerd
+docker save memoh-mcp:latest -o /tmp/memoh-mcp-latest.tar
+docker cp /tmp/memoh-mcp-latest.tar memoh-containerd:/tmp/
+docker exec memoh-containerd ctr i import /tmp/memoh-mcp-latest.tar
+```
+
+#### 4. 清理旧容器
+
+```bash
+# 删除旧容器和快照
+docker exec memoh-containerd ctr t kill -s 9 <container-id>
+docker exec memoh-containerd ctr c rm <container-id>
+docker exec memoh-containerd ctr snapshot rm <snapshot-key>
+
+# 重置数据库中的容器状态
+docker exec -i memoh-postgres psql -U memoh -d memoh -c \
+  "DELETE FROM containers WHERE bot_id IN ('5b52c780...', '07bfa92c...', 'f8da8432...');"
+```
+
+#### 5. 重启服务
+
+```bash
+docker restart memoh-server
+```
+
+**验证结果:**
+
+| Bot | 容器 ID | OpenViking 状态 |
+|-----|---------|----------------|
+| 高歌 | ae1e38dc | ✅ OK |
+| 孙小美 | 5b52c780 | ✅ OK |
+| 钱多多 | 07bfa92c | ✅ OK |
+| 大老千 | f8da8432 | ✅ OK |
+
+**验证命令:**
+```bash
+docker exec memoh-containerd ctr task exec --exec-id test <container-id> \
+  python3 -c "import openviking; print('OK')"
+```
+
+---
+
+*文档更新时间: 2026-03-12*
 *生成工具: Claude Code*
