@@ -122,6 +122,9 @@
               :src="(block as ImageBlockType).src"
               alt="Generated image"
               class="rounded-lg border max-w-full h-auto"
+              loading="eager"
+              width="384"
+              height="384"
             >
           </div>
 

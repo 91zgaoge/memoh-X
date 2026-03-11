@@ -201,7 +201,11 @@
     "testModel": "Test Model",
     "importFromProvider": "Import from Provider",
     "importedCount": "Imported {count} models",
-    "moreErrors": "{count} more errors..."
+    "moreErrors": "{count} more errors...",
+    "searchModelPlaceholder": "Search models…",
+    "searchNoResults": "No matching models",
+    "showingCount": "Showing {count} / {total}",
+    "showMore": "Load more"
   },
   "provider": {
     "add": "Add Provider",

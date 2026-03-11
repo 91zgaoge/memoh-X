@@ -44,6 +44,7 @@
         :src="authedUrl"
         :alt="fileName"
         class="max-w-full h-auto rounded mx-auto"
+        loading="eager"
       >
 
       <!-- Code / Text -->

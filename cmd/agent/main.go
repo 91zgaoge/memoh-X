@@ -27,6 +27,7 @@ import (
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/discord"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/feishu"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/local"
+	_ "github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/qq"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/telegram"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/wechat"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/wecom"
