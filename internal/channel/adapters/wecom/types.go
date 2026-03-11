@@ -335,8 +335,7 @@ func (t *TargetInfo) GetTargetID() string {
 
 // ReplyQueueItem 表示回复队列中的单个任务
 type ReplyQueueItem struct {
-	Frame         WebsocketMessage
-	Resolve       func(frame WebsocketMessage)
-	Reject        func(reason error)
-	WaitForAck    bool // 是否等待ACK：false=快速发送（中间消息），true=等待ACK（最终消息）
+	Frame   WebsocketMessage
+	Resolve func(frame WebsocketMessage)
+	Reject  func(reason error)
 }

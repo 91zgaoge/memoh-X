@@ -59,7 +59,7 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		isMentioned:     isMentioned,
 		streamID:        streamID,
 		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
-		minInterval:     100 * time.Millisecond, // 100ms interval for smooth streaming
+		minInterval:     500 * time.Millisecond, // 500ms interval to avoid rate limiting (30 msg/min = 2s/msg, use half for safety)
 		lastSendTime:    time.Now(),
 		streamStartTime: time.Now(), // 记录流式消息开始时间，用于6分钟超时检查
 	}
@@ -205,8 +205,8 @@ func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, f
 		}
 
 		// For split content:
-		// - Intermediate chunks: finish=false (fast mode, no ACK wait)
-		// - Last chunk: use the original finish value (ack mode if finish=true)
+		// - Intermediate chunks: finish=false (will wait for ACK)
+		// - Last chunk: use the original finish value
 		chunkFinish := isLastChunk && finish
 
 		s.logger.Debug("sending chunk",
@@ -270,9 +270,7 @@ func (s *OutboundStream) sendChunk(ctx context.Context, content string, finish b
 		cmd = CmdSendMsg
 	}
 
-	// CRITICAL: SendStream uses dual-mode queue:
-	// - finish=false: Fast mode, send without waiting for ACK (quick updates)
-	// - finish=true:  Ack mode, wait for ACK (ensure delivery of final message)
+	// All messages are sent via queue with ACK wait to ensure order and delivery
 	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
 		return fmt.Errorf("send chunk: %w", err)
 	}
@@ -331,9 +329,7 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 			slog.Bool("is_mentioned", isMentioned))
 	}
 
-	// CRITICAL: SendStream uses dual-mode queue:
-	// - finish=false: Fast mode, send without waiting for ACK (quick updates)
-	// - finish=true:  Ack mode, wait for ACK (ensure delivery of final message)
+	// All messages are sent via queue with ACK wait to ensure order and delivery
 	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
 		return fmt.Errorf("send stream update: %w", err)
 	}

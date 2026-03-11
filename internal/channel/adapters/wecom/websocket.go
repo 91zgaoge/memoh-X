@@ -34,8 +34,8 @@ const (
 
 	// Reply ack timeout (10 seconds - balance between reliability and speed)
 	// ReplyAckTimeout is the timeout for waiting for ACK from WeCom server.
-	// According to WeCom AI Bot SDK, this should be 5000ms.
-	ReplyAckTimeout = 5 * time.Second
+	// Reduced to 3s for faster streaming while still ensuring delivery.
+	ReplyAckTimeout = 3 * time.Second
 
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
@@ -583,10 +583,9 @@ func (c *WebSocketClient) SendReply(ctx context.Context, reqID string, body inte
 	})
 }
 
-// SendStream sends a stream message using dual-mode queue:
-// - Intermediate updates (finish=false): Fast mode, send without waiting for ACK
-// - Final message (finish=true): Ack mode, wait for ACK before sending next
-// This ensures both speed and reliability while maintaining message order.
+// SendStream sends a stream message.
+// All messages are sent serially via queue, waiting for ACK before sending next.
+// This ensures message order and delivery reliability.
 // The cmd parameter specifies the command to use (CmdRespondMsg for replies, CmdSendMsg for proactive sends).
 func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body StreamMsgBody, cmd ...string) error {
 	// Determine which command to use (default to CmdRespondMsg for backward compatibility)
@@ -594,9 +593,6 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 	if len(cmd) > 0 && cmd[0] != "" {
 		cmdToUse = cmd[0]
 	}
-
-	// Determine mode based on finish flag
-	waitForAck := body.Stream.Finish // Only wait for ACK on final message
 
 	return newPromise(func(resolve func(WebsocketMessage), reject func(error)) {
 		frame := WebsocketMessage{
@@ -612,10 +608,9 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 		frame.Body = bodyBytes
 
 		item := &ReplyQueueItem{
-			Frame:      frame,
-			Resolve:    resolve,
-			Reject:     reject,
-			WaitForAck: waitForAck,
+			Frame:   frame,
+			Resolve: resolve,
+			Reject:  reject,
 		}
 
 		c.queueMu.Lock()
@@ -637,8 +632,7 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 		c.logger.Debug("stream message queued",
 			slog.String("req_id", reqID),
 			slog.Int("queue_len", len(queue)),
-			slog.Bool("finish", body.Stream.Finish),
-			slog.Bool("wait_for_ack", waitForAck))
+			slog.Bool("finish", body.Stream.Finish))
 
 		if len(queue) == 1 {
 			go c.processReplyQueue(reqID)
@@ -647,9 +641,7 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 }
 
 // processReplyQueue processes the reply queue for a specific req_id
-// Dual-mode processing:
-// - Fast mode (WaitForAck=false): Send and immediately continue to next message
-// - Ack mode (WaitForAck=true): Send and wait for ACK before continuing
+// All messages wait for ACK before continuing to ensure delivery and order.
 func (c *WebSocketClient) processReplyQueue(reqID string) {
 	c.queueMu.Lock()
 	queue, exists := c.replyQueues[reqID]
@@ -686,20 +678,6 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		c.queueMu.Lock()
 		if queue, ok := c.replyQueues[reqID]; ok && len(queue) > 0 {
 			c.replyQueues[reqID] = queue[1:]
-		}
-		c.queueMu.Unlock()
-		return
-	}
-
-	// Dual-mode handling based on WaitForAck flag
-	if !item.WaitForAck {
-		// Fast mode: Send and immediately continue (for intermediate stream updates)
-		c.logger.Debug("reply sent (fast mode), continuing to next", slog.String("req_id", reqID))
-		item.Resolve(WebsocketMessage{}) // Resolve immediately without waiting for ACK
-
-		c.queueMu.Lock()
-		if queue, ok := c.replyQueues[reqID]; ok && len(queue) > 0 {
-			c.replyQueues[reqID] = queue[1:]
 			if len(c.replyQueues[reqID]) > 0 {
 				go c.processReplyQueue(reqID)
 			} else {
@@ -710,7 +688,6 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		return
 	}
 
-	// Ack mode: Wait for ACK before continuing (for final messages)
 	c.logger.Debug("reply sent, waiting for ack", slog.String("req_id", reqID))
 
 	// Set up timeout
