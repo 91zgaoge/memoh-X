@@ -85,7 +85,7 @@
 ## 验证检查清单
 
 ### 后端检查
-- [x] QQ 适配器文件已添加
+- [x] QQ 适配器文件已添加 (16个文件)
 - [x] Discord stream.go 已更新
 - [x] cmd/agent/main.go 已导入 QQ 适配器
 - [ ] 消息中止功能待实现
@@ -95,17 +95,26 @@
 - [x] file-preview-dialog.vue 已添加 loading="eager"
 - [x] model-list.vue 已添加增量渲染
 - [x] i18n 翻译已更新
+- [x] 前端构建成功 (pnpm run build)
 - [ ] useChat.ws.ts 待添加
 - [ ] useChat.ts 待更新
 - [ ] chat-list.ts 待更新
 
 ### 企业微信适配器检查
-- [x] adapter.go (本地定制版本)
+- [x] adapter.go (本地定制版本, 1043行)
 - [x] config.go
 - [x] crypto.go
 - [x] stream.go
 - [x] types.go
 - [x] websocket.go
+- [x] disconnected_event 事件支持
+- [x] chat_type 字段支持
+
+### 核心本地功能检查
+- [x] 文件解析增强 (docx, xlsx, pdf, pptx)
+- [x] 文档生成技能
+- [x] 模型连接测试功能 (probe.go)
+- [x] 自动获取模型功能
 
 ---
 
@@ -163,6 +172,40 @@ git log --oneline -3
 # c72353b6 chore: 提交当前工作进度，准备同步上游更新
 # e074c4b0 feat(wecom): 添加思考中即时回复功能
 ```
+
+---
+
+---
+
+## 测试结果
+
+### 2026-03-11 测试
+
+**服务状态**: ✅ 所有核心服务运行正常
+- Server API (8080): ✓
+- Agent (8081): ✓
+- Web (8082): ✓
+- Postgres: ✓
+
+**前端构建**: ✅ 构建成功
+```
+✓ built in 24.64s
+dist/ 目录生成成功
+```
+
+**移植功能验证**: ✅ 全部通过
+- QQ适配器: 16个文件已添加
+- Discord修复: stream.go 已更新
+- 图片冻结修复: loading="eager" 已添加
+- 模型增量渲染: 分页和搜索功能已添加
+- i18n翻译: 中英文翻译已更新
+
+**核心本地功能验证**: ✅ 全部保留
+- 企业微信适配器: 6个文件完整
+- 文件解析增强: 5个文件完整
+- 文档生成技能: 4个技能目录完整
+- 模型连接测试: probe.go 和接口存在
+- 自动获取模型: 导入接口存在
 
 ---
 
