@@ -43,7 +43,11 @@ const StreamTimeout = 6 * time.Minute
 const MaxContentBytes = 20480
 
 // NewOutboundStream creates a new outbound stream
-func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, logger *slog.Logger) *OutboundStream {
+func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger) *OutboundStream {
+	// If no streamID provided, generate a new one
+	if streamID == "" {
+		streamID = generateStreamID()
+	}
 	return &OutboundStream{
 		adapter:         adapter,
 		cfg:             cfg,
@@ -53,7 +57,7 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		userID:          userID,
 		chatType:        chatType,
 		isMentioned:     isMentioned,
-		streamID:        generateStreamID(),
+		streamID:        streamID,
 		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
 		minInterval:     100 * time.Millisecond, // 100ms interval for smooth streaming
 		lastSendTime:    time.Now(),

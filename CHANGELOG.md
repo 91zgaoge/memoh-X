@@ -1,5 +1,69 @@
 # Memoh-v2 更新日志
 
+## [2026-03-12] 修复企业微信流式消息消失/重置问题
+
+### 问题描述
+企业微信端收到的消息在流式输出过程中会突然消失，内容被重置回最初的"思考中..."提示，而 Web UI 端能正常看到完整回复。用户只能看到"收到！正在为您..."而无法看到实际回复内容。
+
+### 根本原因
+根据 WeCom AI Bot SDK 技术规范，流式消息通过 `(req_id, stream.id)` 对来唯一标识一个消息流：
+> WeCom identifies a stream sequence by (req_id, stream.id) pair.
+
+**代码问题：**
+- `sendThinkingReply()` 函数在发送"思考中..."提示时，使用 `generateStreamID()` 生成了一个新的 streamID
+- 稍后创建 `OutboundStream` 发送实际回复时，又使用 `generateStreamID()` 生成了**另一个不同的 streamID**
+- 由于两个消息使用了不同的 streamID，企业微信将它们视为两个独立的消息
+- 这导致实际回复无法正确更新"思考中..."消息，而是被当作新消息处理，造成消息"消失"或"重置"的错觉
+
+### 修复内容
+
+**涉及文件：**
+- `internal/channel/adapters/wecom/stream.go`
+- `internal/channel/adapters/wecom/adapter.go`
+
+**关键修改：**
+
+1. **统一 streamID 生成逻辑**
+   - `NewOutboundStream()` 函数新增 `streamID` 参数，支持从调用方传入 streamID
+   - `sendThinkingReply()` 函数新增 `streamID` 参数，使用传入的 streamID 而非生成新的
+
+2. **在消息处理流程中传递 streamID**
+   - 所有消息类型处理函数（文本、图片、文件、语音、混合内容）统一生成 streamID
+   - streamID 通过 `msg.Metadata["stream_id"]` 传递给后续流程
+   - `CreateOutboundStream()` 从 metadata 中提取 streamID，确保与 thinking 回复一致
+
+3. **代码变更摘要**
+```go
+// 修改前：thinking 回复和实际回复使用不同 streamID
+a.sendThinkingReply(ctx, wsClient, reqID)  // 生成新的 streamID
+// ...
+return NewOutboundStream(..., generateStreamID(), ...)  // 又生成新的 streamID
+
+// 修改后：使用相同的 streamID
+streamID := generateStreamID()
+a.sendThinkingReply(ctx, wsClient, reqID, streamID)  // 使用指定的 streamID
+msg.Metadata["stream_id"] = streamID  // 传递给后续流程
+// ...
+return NewOutboundStream(..., streamID, ...)  // 使用相同的 streamID
+```
+
+### 技术规范依据
+
+根据 WeCom AI Bot SDK 文档 (`aibot-sdk/aibot-node-sdk-main/src/types/api.ts`):
+> 流式消息通过 `req_id` 和 `stream.id` 对来唯一标识一个消息流
+> - 相同 `(req_id, stream.id)` 的消息会更新同一条消息
+> - 不同 `stream.id` 的消息会被视为独立消息
+
+### 验证结果
+- ✅ 编译通过，`docker build` 成功
+- ✅ 服务重启正常，WeCom 连接建立成功
+- ✅ 流式消息正常更新，不再消失或重置
+
+### 相关提交
+- `<commit_hash>` - fix(wecom): 修复流式消息消失问题，确保 thinking 回复和实际响应使用相同 streamID
+
+---
+
 ## [2026-03-12] 修复企业微信长消息截断问题
 
 ### 问题描述

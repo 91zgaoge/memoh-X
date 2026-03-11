@@ -166,16 +166,23 @@ func (a *Adapter) Descriptor() channel.Descriptor {
 }
 
 // sendThinkingReply sends an immediate "thinking" response to improve user experience
-func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClient, reqID string) {
+// CRITICAL: Must use the same streamID as the actual response stream
+func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClient, reqID string, streamID string) {
 	if wsClient == nil || reqID == "" {
 		return
 	}
 
+	// If no streamID provided, generate one
+	if streamID == "" {
+		streamID = generateStreamID()
+	}
+
 	// Use stream format for thinking reply (same as final response)
+	// CRITICAL: Must use the same streamID as the actual response to update the same message
 	thinkingBody := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
-			ID:      generateStreamID(),
+			ID:      streamID,
 			Finish:  false, // Not finished, will be updated with final response
 			Content: "思考中...",
 		},
@@ -185,7 +192,7 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 	if err := wsClient.SendStream(ctx, reqID, thinkingBody); err != nil {
 		a.logger.Debug("failed to send thinking reply", slog.Any("error", err))
 	} else {
-		a.logger.Info("thinking reply sent", slog.String("req_id", reqID))
+		a.logger.Info("thinking reply sent", slog.String("req_id", reqID), slog.String("stream_id", streamID))
 	}
 }
 
@@ -274,7 +281,20 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		userID = strings.TrimPrefix(target, "user_id:")
 	}
 
-	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, a.logger), nil
+	// Extract stream_id from metadata (set by sendThinkingReply)
+	// CRITICAL: Must use the same streamID as the thinking reply to update the same message
+	streamID := ""
+	if opts.Metadata != nil {
+		if v, ok := opts.Metadata["stream_id"].(string); ok {
+			streamID = v
+		}
+	}
+	// If no stream_id in metadata (fallback), generate a new one
+	if streamID == "" {
+		streamID = generateStreamID()
+	}
+
+	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, streamID, a.logger), nil
 }
 
 // Send sends a message directly (non-streaming)
@@ -458,8 +478,12 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			// Check if should trigger response
 			if shouldTrigger {
 				// Send immediate "thinking" reply for better UX
-				a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
-				a.logger.Info("calling handler for text message", slog.String("req_id", wsMsg.Headers.ReqID), slog.String("content", content))
+				// CRITICAL: Generate streamID here and pass to both thinking reply and handler
+				streamID := generateStreamID()
+				a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
+				// Store streamID in message metadata so CreateOutboundStream can use it
+				msg.Metadata["stream_id"] = streamID
+				a.logger.Info("calling handler for text message", slog.String("req_id", wsMsg.Headers.ReqID), slog.String("content", content), slog.String("stream_id", streamID))
 				err := handler(ctx, cfg, msg)
 				if err != nil {
 					a.logger.Error("handler returned error", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
@@ -509,8 +533,12 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			msg.Message.Text = "[用户发送了一张图片]"
 			msg.Message.Format = channel.MessageFormatPlain
 			// Send immediate "thinking" reply for better UX
-			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
-			a.logger.Info("calling handler for image message", slog.String("req_id", wsMsg.Headers.ReqID))
+			// CRITICAL: Generate streamID here and pass to both thinking reply and handler
+			streamID := generateStreamID()
+			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
+			// Store streamID in message metadata so CreateOutboundStream can use it
+			msg.Metadata["stream_id"] = streamID
+			a.logger.Info("calling handler for image message", slog.String("req_id", wsMsg.Headers.ReqID), slog.String("stream_id", streamID))
 			err = handler(ctx, cfg, msg)
 			if err != nil {
 				a.logger.Error("handler returned error for image", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
@@ -583,7 +611,11 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			msg.Message.Text = "[用户发送了一个文件: " + displayName + "]"
 			msg.Message.Format = channel.MessageFormatPlain
 			// Send immediate "thinking" reply for better UX
-			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
+			// CRITICAL: Generate streamID here and pass to both thinking reply and handler
+			streamID := generateStreamID()
+			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
+			// Store streamID in message metadata so CreateOutboundStream can use it
+			msg.Metadata["stream_id"] = streamID
 			return handler(ctx, cfg, msg)
 		}
 
@@ -601,7 +633,11 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			msg.Message.Text = body.Voice.Content
 			msg.Message.Format = channel.MessageFormatPlain
 			// Send immediate "thinking" reply for better UX
-			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID)
+			// CRITICAL: Generate streamID here and pass to both thinking reply and handler
+			streamID := generateStreamID()
+			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
+			// Store streamID in message metadata so CreateOutboundStream can use it
+			msg.Metadata["stream_id"] = streamID
 			return handler(ctx, cfg, msg)
 		}
 
@@ -852,8 +888,12 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 	}
 
 	// Send immediate "thinking" reply for better UX
+	// CRITICAL: Generate streamID here and pass to both thinking reply and handler
+	streamID := generateStreamID()
 	wsClient := a.getWebSocketClient(cfg.BotID)
-	a.sendThinkingReply(ctx, wsClient, reqID)
+	a.sendThinkingReply(ctx, wsClient, reqID, streamID)
+	// Store streamID in message metadata so CreateOutboundStream can use it
+	msg.Metadata["stream_id"] = streamID
 
 	return handler(ctx, cfg, msg)
 }

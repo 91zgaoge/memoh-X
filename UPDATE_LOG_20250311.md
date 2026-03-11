@@ -567,5 +567,73 @@ docker logs memoh-server --tail 20
 
 ---
 
+### 10.11 企业微信流式消息消失/重置问题修复
+
+**修复时间:** 2026-03-12
+**问题:** 流式输出时消息突然消失，内容重置回"思考中..."，用户无法看到实际回复
+**根本原因:** Thinking 回复和实际响应使用了不同的 `streamID`，WeCom 将它们视为独立消息
+
+**技术规范依据:**
+根据 WeCom AI Bot SDK 文档 (`aibot-sdk/aibot-node-sdk-main/src/types/api.ts`):
+> 流式消息通过 `(req_id, stream.id)` 对来唯一标识一个消息流
+> - 相同 `(req_id, stream.id)` 的消息会更新同一条消息
+> - 不同 `stream.id` 的消息会被视为独立消息
+
+**修复内容:**
+
+#### 代码变更
+
+**文件:** `internal/channel/adapters/wecom/adapter.go`
+
+```go
+// 修改 sendThinkingReply 函数签名，接受 streamID 参数
+func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClient, reqID string, streamID string)
+
+// 修改 NewOutboundStream 函数签名，接受 streamID 参数
+func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger)
+
+// 消息处理流程中使用相同的 streamID
+streamID := generateStreamID()
+a.sendThinkingReply(ctx, wsClient, reqID, streamID)  // 使用指定的 streamID
+msg.Metadata["stream_id"] = streamID  // 传递给 CreateOutboundStream
+
+// CreateOutboundStream 中提取并使用相同的 streamID
+streamID := ""
+if opts.Metadata != nil {
+    if v, ok := opts.Metadata["stream_id"].(string); ok {
+        streamID = v
+    }
+}
+return NewOutboundStream(..., streamID, ...)
+```
+
+#### 涉及文件
+- `internal/channel/adapters/wecom/adapter.go` - 统一 streamID 生成和传递
+- `internal/channel/adapters/wecom/stream.go` - 支持从外部传入 streamID
+
+#### 用户体验改进
+- 消息流式输出不再消失或重置
+- "思考中..."提示正确更新为实际回复内容
+- 企业微信端和 Web UI 端显示一致
+
+**部署验证:**
+
+```bash
+# 重新构建并启动
+docker compose up -d --build server
+
+# 验证服务状态
+docker compose ps
+# memoh-server  Up (healthy)  0.0.0.0:8080->8080/tcp
+
+# 验证 WeCom 连接
+docker logs memoh-server --tail 20
+# "WeCom connection established" 日志确认连接成功
+```
+
+**提交:** `<commit_hash>` - fix(wecom): 修复流式消息消失问题，确保 thinking 回复和实际响应使用相同 streamID
+
+---
+
 *文档更新时间: 2026-03-12*
 *生成工具: Claude Code*
