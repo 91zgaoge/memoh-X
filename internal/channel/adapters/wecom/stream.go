@@ -156,13 +156,25 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 				slog.Duration("elapsed", time.Since(s.streamStartTime)))
 			s.mu.Lock()
 			content := s.buffer.String()
+			lastSent := s.lastSentContent
+			s.mu.Unlock()
+
+			// Use the longer content to prevent "thinking..." fallback
+			if len(lastSent) > len(content) {
+				content = lastSent
+			}
+
+			// CRITICAL: Never send empty content on timeout
 			if content == "" {
 				content = "处理超时，请稍后再试。"
+			} else {
+				content = content + "\n\n[系统提示: 处理超时，以上是已生成的回复]"
 			}
-			s.mu.Unlock()
+
 			s.closed.Store(true)
 			close(s.stopTicker)
-			return s.sendFullContent(ctx, content, true)
+			s.sendFullContent(ctx, content, true)
+			return nil
 		}
 
 		s.mu.Lock()
@@ -229,31 +241,40 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 		errorMsg := event.Error
 		if errorMsg == "" {
-			errorMsg = "处理消息时出错，请稍后再试。"
+			errorMsg = "处理中断，以下是已生成的回复"
 		}
 
 		s.logger.Error("stream error", slog.String("error", event.Error))
 
-		// Send error response immediately with finish=true
+		// CRITICAL: Always send finish=true with existing content to prevent "thinking..." fallback
 		if !s.sent.Load() {
-			// CRITICAL: Append error to existing content instead of replacing
-			// This prevents "retracting" the already visible content
 			s.mu.Lock()
 			existingContent := s.buffer.String()
+			lastSent := s.lastSentContent
 			s.mu.Unlock()
 
-			var finalMsg string
-			if existingContent != "" {
-				finalMsg = existingContent + "\n\n[系统提示: " + errorMsg + "]"
-			} else {
-				finalMsg = errorMsg
+			// Use the longer of existingContent or lastSentContent
+			// This ensures we never send empty or shorter content
+			finalContent := existingContent
+			if len(lastSent) > len(finalContent) {
+				finalContent = lastSent
 			}
 
-			if err := s.sendFullContent(ctx, finalMsg, true); err != nil {
-				s.logger.Error("failed to send error response", slog.Any("error", err))
-				return err
+			var finalMsg string
+			if finalContent != "" {
+				// Append error notice to existing content
+				finalMsg = finalContent + "\n\n[系统提示: " + errorMsg + "]"
+			} else {
+				// Only if truly empty, use error message with explicit content
+				finalMsg = "处理过程中断，请重试。"
 			}
-			s.logger.Info("error response sent successfully")
+
+			s.logger.Info("sending error finish message with content",
+				slog.Int("content_len", len(finalContent)),
+				slog.Int("final_msg_len", len(finalMsg)))
+
+			// Force send with finish=true - ignore errors to prevent blocking
+			s.sendFullContent(ctx, finalMsg, true)
 			s.sent.Store(true)
 		}
 
@@ -411,14 +432,13 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 
 	s.mu.Lock()
 	content := s.buffer.String()
-	// CRITICAL: Ensure we don't send shorter content than already sent
-	if len(content) < len(s.lastSentContent) {
-		s.logger.Warn("close content shorter than last sent, using last sent",
-			slog.Int("content_len", len(content)),
-			slog.Int("last_sent_len", len(s.lastSentContent)))
-		content = s.lastSentContent
-	}
+	lastSent := s.lastSentContent
 	s.mu.Unlock()
+
+	// CRITICAL: Use the longest content available to prevent "thinking..." fallback
+	if len(lastSent) > len(content) {
+		content = lastSent
+	}
 
 	// CRITICAL: Never send empty final message
 	if content == "" {
@@ -428,7 +448,11 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 
 	// Send final response with finish=true (with retries)
 	s.logger.Info("closing stream with final message", slog.Int("content_len", len(content)))
-	return s.sendFullContent(ctx, content, true)
+
+	// Ignore error to ensure we don't block - the message may still be visible
+	s.sendFullContent(ctx, content, true)
+	s.sent.Store(true)
+	return nil
 }
 
 // generateStreamID generates a unique stream ID
