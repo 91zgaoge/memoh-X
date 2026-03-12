@@ -41,6 +41,9 @@ type OutboundStream struct {
 	// Track last sent content and time for rate limiting
 	lastSentContent string
 	lastSendTime    time.Time
+
+	// Message rate limiting: track send timestamps in a sliding window (1 minute)
+	sendTimes []time.Time
 }
 
 // StreamTimeout 流式消息超时时间（6分钟）
@@ -50,7 +53,12 @@ const StreamTimeout = 6 * time.Minute
 const MaxContentBytes = 20480
 
 // MinSendInterval 流式消息最小发送间隔（控制发送频率，避免过多消息）
-const MinSendInterval = 600 * time.Millisecond // 600ms，与流畅性和实时性平衡
+// WeCom 限制：30条/分钟，所以最小间隔为 2 秒（60/30=2）
+// 使用 3 秒留有更多余量，确保不会触发限制，同时减少消息数量避免干扰用户阅读
+const MinSendInterval = 3 * time.Second // 3秒，20条/分钟，严格遵守 WeCom 限制
+
+// MaxMessagesPerMinute 每分钟最大消息数（WeCom 限制 30，使用 20 留有余量）
+const MaxMessagesPerMinute = 20
 
 // NewOutboundStream creates a new outbound stream
 func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger) *OutboundStream {
@@ -150,6 +158,43 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 		s.logger.Debug("stream status", slog.String("status", string(event.Status)))
 
 	case channel.StreamEventDelta:
+		// CRITICAL: Skip reasoning phase deltas (think tags content)
+		// This prevents showing internal reasoning to users
+		if event.Metadata != nil {
+			if phase, ok := event.Metadata["phase"].(string); ok && phase == "reasoning" {
+				// Additional check: skip if reasoning content is empty or only whitespace
+				if strings.TrimSpace(event.Delta) == "" {
+					s.logger.Debug("skipping empty reasoning delta")
+					return nil
+				}
+				s.logger.Debug("skipping reasoning delta",
+					slog.Int("delta_len", len(event.Delta)))
+				return nil
+			}
+		}
+
+		// CRITICAL: Skip ALL think tag related content from qwen model
+		// This handles various forms of think tags that qwen3.5 outputs
+		trimmedDelta := strings.TrimSpace(event.Delta)
+
+		// Skip pure think tags (empty or with only whitespace)
+		if isThinkTagOnly(trimmedDelta) {
+			s.logger.Debug("skipping think tag only content",
+				slog.String("delta_preview", truncateString(event.Delta, 50)))
+			return nil
+		}
+
+		// Skip if after removing think tags, content is truly empty (but preserve newlines)
+		contentWithoutThink := stripThinkTags(event.Delta)
+		if isEmptyContent(contentWithoutThink) {
+			s.logger.Debug("skipping delta with only think tags and spaces (newlines preserved in other content)",
+				slog.String("original", truncateString(event.Delta, 50)))
+			return nil
+		}
+
+		// Use the cleaned content
+		event.Delta = contentWithoutThink
+
 		// Check for 6-minute timeout
 		if time.Since(s.streamStartTime) > StreamTimeout {
 			s.logger.Warn("stream timeout: exceeding 6 minute limit, forcing finish",
@@ -300,6 +345,32 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 		s.logger.Warn("final message content was empty, using default")
 	}
 
+	// Rate limiting: check if we've sent too many messages in the last minute
+	// CRITICAL: Final messages (finish=true) bypass rate limiting to ensure delivery
+	if !finish {
+		s.mu.Lock()
+		now := time.Now()
+		// Clean up old timestamps (older than 1 minute)
+		cutoff := now.Add(-1 * time.Minute)
+		validTimes := make([]time.Time, 0, len(s.sendTimes))
+		for _, t := range s.sendTimes {
+			if t.After(cutoff) {
+				validTimes = append(validTimes, t)
+			}
+		}
+		s.sendTimes = validTimes
+
+		// Check if we've hit the limit
+		if len(s.sendTimes) >= MaxMessagesPerMinute {
+			s.mu.Unlock()
+			s.logger.Warn("rate limit exceeded, skipping intermediate update",
+				slog.Int("sent_in_last_minute", len(s.sendTimes)),
+				slog.Int("limit", MaxMessagesPerMinute))
+			return fmt.Errorf("rate limit exceeded: %d messages in last minute", len(s.sendTimes))
+		}
+		s.mu.Unlock()
+	}
+
 	// Check if content exceeds byte limit (WeCom AI Bot SDK limit: 20480 bytes)
 	// If so, truncate it and add a notice
 	truncatedContent, wasTruncated := s.truncateToMaxBytes(content, MaxContentBytes-100) // Reserve space for notice
@@ -340,12 +411,22 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 	// - 单聊 (single): always use CmdRespondMsg
 	// - 群聊且被@ (group + isMentioned): use CmdRespondMsg (reply to the mention)
 	// - 群聊未被@ (group + !isMentioned): use CmdSendMsg (proactive send)
+	//
+	// CRITICAL: CmdSendMsg (proactive send) must use a NEW req_id, not the original message's req_id
+	// CmdRespondMsg must use the original req_id from the triggering message
 	cmd := CmdRespondMsg
+	sendReqID := reqID // Default: use original req_id for respond
 	if chatType == "group" && !isMentioned {
 		cmd = CmdSendMsg
+		// Generate a new req_id for proactive send - this is critical for SDK compliance
+		// WeCom SDK requires new req_id for proactive messages (aibot_send_msg)
+		// Using original req_id will cause ACK timeout because WeCom won't recognize it
+		sendReqID = generateReqID(CmdSendMsg)
 		s.logger.Debug("using proactive send for group message without mention",
 			slog.String("chat_type", chatType),
-			slog.Bool("is_mentioned", isMentioned))
+			slog.Bool("is_mentioned", isMentioned),
+			slog.String("original_req_id", reqID),
+			slog.String("send_req_id", sendReqID))
 	}
 
 	// Send message (wait for ACK as per SDK specification)
@@ -373,7 +454,7 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 			time.Sleep(delay)
 		}
 
-		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+		if err := wsClient.SendStream(ctx, sendReqID, body, cmd); err != nil {
 			lastErr = err
 			s.logger.Warn("send attempt failed",
 				slog.Int("attempt", attempt+1),
@@ -382,7 +463,13 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 			continue
 		}
 
-		// Success
+		// Success - record send time for rate limiting (only for non-finish messages)
+		if !finish {
+			s.mu.Lock()
+			s.sendTimes = append(s.sendTimes, time.Now())
+			s.mu.Unlock()
+		}
+
 		if finish {
 			s.sent.Store(true)
 			s.logger.Info("final stream response sent successfully",
@@ -481,4 +568,91 @@ func (s *OutboundStream) truncateToMaxBytes(content string, maxBytes int) (strin
 	}
 
 	return string(contentBytes[:truncateAt]), true
+}
+
+// isThinkTagOnly checks if the content is only think tags (possibly with whitespace inside)
+// Examples that return true: "<think></think>", "<think>   </think>", "<think>", "</think>"
+// PRESERVES newlines outside of think tags - only considers it "tag only" if there's nothing else
+func isThinkTagOnly(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return true
+	}
+
+	// Match think tags with optional whitespace-only content (NOT newlines)
+	if strings.HasPrefix(trimmed, "<think>") && strings.HasSuffix(trimmed, "</think>") {
+		inner := trimmed[7 : len(trimmed)-8] // Extract content between tags
+		// Only consider it empty if inner content is spaces/tabs only (not newlines)
+		for _, r := range inner {
+			if r != ' ' && r != '\t' {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Match standalone opening or closing tags
+	if trimmed == "<think>" || trimmed == "</think>" {
+		return true
+	}
+
+	return false
+}
+
+// isContentInThinkTags checks if content is entirely wrapped in think tags
+// This handles cases where reasoning content is wrapped in think tags
+func isContentInThinkTags(content string) bool {
+	content = strings.TrimSpace(content)
+	return strings.HasPrefix(content, "<think>") && strings.HasSuffix(content, "</think>")
+}
+
+// stripThinkTags removes think tags from content and returns the inner content
+// If no think tags are present, returns the original content
+// PRESERVES newlines and whitespace inside the content (only removes the tags themselves)
+func stripThinkTags(content string) string {
+	original := content
+
+	// Remove opening think tag if present at the beginning (after optional whitespace)
+	// We preserve leading whitespace/newlines by finding where <think> actually is
+	thinkStart := strings.Index(original, "<think>")
+	if thinkStart == -1 {
+		// No opening tag, return as-is
+		return original
+	}
+
+	// Find closing tag
+	thinkEnd := strings.Index(original[thinkStart:], "</think>")
+	if thinkEnd == -1 {
+		// No closing tag, return as-is (malformed)
+		return original
+	}
+	thinkEnd += thinkStart + 8 // Adjust for offset and length of </think>
+
+	// Extract content between tags
+	innerStart := thinkStart + 7 // Length of <think>
+	innerEnd := thinkEnd - 8     // Length of </think>
+
+	if innerStart >= innerEnd {
+		// Empty or malformed tags
+		return original[:thinkStart] + original[thinkEnd:]
+	}
+
+	innerContent := original[innerStart:innerEnd]
+
+	// Return: before <think> + inner content + after </think>
+	result := original[:thinkStart] + innerContent + original[thinkEnd:]
+	return result
+}
+
+// isEmptyContent checks if content is truly empty (no visible characters)
+// NEWLINES are preserved as they are meaningful for formatting
+func isEmptyContent(content string) bool {
+	// Only consider it empty if there's literally nothing or only spaces/tabs
+	// Newlines (\n, \r) are NOT considered empty as they are formatting
+	for _, r := range content {
+		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
+			return false
+		}
+	}
+	return true
 }

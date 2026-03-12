@@ -226,6 +226,16 @@ func (c *WebSocketClient) connect(ctx context.Context) error {
 	c.reconnectAttempts = 0
 	c.missedPongCount = 0
 
+	// Set up WebSocket keepalive
+	// This is critical to detect connection drops early
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.missedPongCount = 0
+		c.logger.Debug("websocket pong received")
+		return nil
+	})
+
 	c.logger.Info("websocket connected")
 
 	// Send subscription request
@@ -284,6 +294,11 @@ func (c *WebSocketClient) run(ctx context.Context) {
 	heartbeatTicker := time.NewTicker(HeartbeatInterval)
 	defer heartbeatTicker.Stop()
 
+	// Start message reader in a separate goroutine
+	// This is critical because readMessage blocks and would block the select if in default case
+	messageCh := make(chan error, 1)
+	go c.messageReader(ctx, messageCh)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -299,6 +314,8 @@ func (c *WebSocketClient) run(ctx context.Context) {
 			if err := c.reconnect(ctx); err != nil {
 				c.logger.Error("reconnect failed", slog.Any("error", err))
 			}
+			// Restart message reader after reconnect
+			go c.messageReader(ctx, messageCh)
 
 		case <-heartbeatTicker.C:
 			if err := c.sendHeartbeat(); err != nil {
@@ -306,16 +323,31 @@ func (c *WebSocketClient) run(ctx context.Context) {
 				go c.triggerReconnect()
 			}
 
-		default:
-			if !c.IsConnected() {
-				time.Sleep(ReconnectDelay)
-				continue
-			}
-
-			if err := c.readMessage(ctx); err != nil {
+		case err := <-messageCh:
+			if err != nil {
 				c.logger.Error("read message error", slog.Any("error", err))
 				go c.triggerReconnect()
-				time.Sleep(ReconnectDelay)
+				// Restart message reader after error
+				go c.messageReader(ctx, messageCh)
+			}
+		}
+	}
+}
+
+// messageReader continuously reads messages and sends errors to the channel
+func (c *WebSocketClient) messageReader(ctx context.Context, ch chan<- error) {
+	for {
+		if !c.IsConnected() {
+			time.Sleep(ReconnectDelay)
+			continue
+		}
+
+		if err := c.readMessage(ctx); err != nil {
+			select {
+			case ch <- err:
+				return // Exit after sending error
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
@@ -331,10 +363,17 @@ func (c *WebSocketClient) readMessage(ctx context.Context) error {
 		return fmt.Errorf("connection is nil")
 	}
 
+	// Reset read deadline - give 60 seconds to receive next message
+	// This detects connection drops while allowing for idle periods
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 	var msg WebsocketMessage
 	if err := conn.ReadJSON(&msg); err != nil {
 		return fmt.Errorf("read json: %w", err)
 	}
+
+	// Reset read deadline after successful read
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	c.logger.Info("websocket message received",
 		slog.String("cmd", msg.Cmd),
@@ -386,7 +425,7 @@ func (c *WebSocketClient) handleAck(frame WebsocketMessage) {
 	// Heartbeat ack
 	if frame.ErrCode == 0 {
 		c.missedPongCount = 0
-		c.logger.Debug("heartbeat ack received")
+		c.logger.Debug("heartbeat ack received", slog.String("req_id", reqID))
 	} else {
 		c.logger.Warn("heartbeat ack error", slog.Int("errcode", frame.ErrCode), slog.String("errmsg", frame.ErrMsg))
 	}
@@ -433,12 +472,14 @@ func (c *WebSocketClient) handleReplyAck(reqID string, frame WebsocketMessage, p
 	}
 }
 
-// sendHeartbeat sends a ping message
+// sendHeartbeat sends websocket ping and application heartbeat
 func (c *WebSocketClient) sendHeartbeat() error {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	conn := c.conn
+	connected := c.connected
+	c.mu.RUnlock()
 
-	if !c.connected || c.conn == nil {
+	if !connected || conn == nil {
 		return fmt.Errorf("not connected")
 	}
 
@@ -449,18 +490,30 @@ func (c *WebSocketClient) sendHeartbeat() error {
 		return fmt.Errorf("max missed pongs reached")
 	}
 
+	// Send WebSocket native ping frame first
+	// This triggers a pong response which helps detect connection health
+	if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+		c.logger.Warn("websocket ping failed", slog.Any("error", err))
+		// Continue to application heartbeat even if websocket ping fails
+	}
+
 	c.missedPongCount++
 
-	msg := WebsocketMessage{
-		Cmd: CmdHeartbeat,
-		Headers: MessageHeaders{
-			ReqID: generateReqID(CmdHeartbeat),
-		},
+	// Also send application-level heartbeat
+	c.mu.RLock()
+	if c.connected && c.conn != nil {
+		msg := WebsocketMessage{
+			Cmd: CmdHeartbeat,
+			Headers: MessageHeaders{
+				ReqID: generateReqID(CmdHeartbeat),
+			},
+		}
+		if err := c.conn.WriteJSON(msg); err != nil {
+			c.mu.RUnlock()
+			return fmt.Errorf("write ping: %w", err)
+		}
 	}
-
-	if err := c.conn.WriteJSON(msg); err != nil {
-		return fmt.Errorf("write ping: %w", err)
-	}
+	c.mu.RUnlock()
 
 	c.logger.Debug("heartbeat sent")
 	return nil
@@ -688,7 +741,7 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		return
 	}
 
-	c.logger.Debug("reply sent, waiting for ack", slog.String("req_id", reqID))
+	c.logger.Debug("reply sent, waiting for ack", slog.String("req_id", reqID), slog.String("cmd", item.Frame.Cmd))
 
 	// Set up timeout
 	timer := time.AfterFunc(ReplyAckTimeout, func() {
@@ -697,9 +750,11 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		if exists {
 			delete(c.pendingAcks, reqID)
 			c.queueMu.Unlock()
-			c.logger.Warn("reply ack timeout", slog.String("req_id", reqID))
+			c.logger.Warn("reply ack timeout, assuming message delivered", slog.String("req_id", reqID))
+			// CRITICAL: Don't reject on ACK timeout - message may have been delivered
+			// Just continue processing queue. This prevents stream interruption.
 			if pending != nil {
-				pending.Reject(fmt.Errorf("reply ack timeout (%v)", ReplyAckTimeout))
+				pending.Resolve(WebsocketMessage{}) // Resolve with empty frame to continue
 			}
 			// Continue processing queue
 			c.queueMu.Lock()
