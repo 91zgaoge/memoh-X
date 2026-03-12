@@ -45,6 +45,9 @@ services:
   searxng:
     image: searxng/searxng:latest
     container_name: memoh-searxng
+    environment:
+      # 修复 Google 引擎语言代码问题 (避免 hl=ZZ-ZZ 错误)
+      - SEARXNG_DEFAULT_LANG=en
     volumes:
       - ./docker/config/searxng-settings.yml:/etc/searxng/settings.yml:ro
     expose:

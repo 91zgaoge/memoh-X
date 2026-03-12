@@ -11,6 +11,9 @@ search:
   formats:
     - html
     - json
+  # 设置默认语言，避免 Google 引擎使用无效的 ZZ-ZZ 语言代码
+  default_lang: en
+  language: en-US
 
 # HTTP proxy configuration for outbound requests
 outgoing:
@@ -29,60 +32,64 @@ outgoing:
 ui:
   static_use_hash: true
 
+# 覆盖引擎配置 - 使用 disabled 属性
 engines:
-  # 主要搜索引擎 - 增加超时和重试
+  # 主要搜索引擎
+  # Google 引擎 - 通过 SEARXNG_DEFAULT_LANG 环境变量修复语言代码问题
   - name: google
     engine: google
     shortcut: g
     timeout: 10.0
-    # 使用多个 Google 域名以增加成功率
+    disabled: false
     base_url: https://www.google.com
 
   - name: bing
     engine: bing
     shortcut: b
     timeout: 10.0
+    disabled: false
     base_url: https://www.bing.com
 
   - name: brave
     engine: brave
     shortcut: br
     timeout: 10.0
+    disabled: true
 
-  # 备用搜索引擎
-  - name: qwant
-    engine: qwant
-    shortcut: qw
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
     timeout: 10.0
+    disabled: true
 
   - name: startpage
     engine: startpage
     shortcut: sp
     timeout: 10.0
-
-  - name: wikipedia
-    engine: wikipedia
-    shortcut: wp
-    timeout: 5.0
-
-  - name: wikidata
-    engine: wikidata
-    shortcut: wd
-    timeout: 5.0
+    disabled: true
 
   # 中文搜索引擎
   - name: baidu
     engine: baidu
     shortcut: bd
     timeout: 10.0
+    disabled: false
 
   - name: sogou
     engine: sogou
     shortcut: sg
     timeout: 10.0
+    disabled: false
 
-  # 新闻/内容聚合
-  - name: mojeek
-    engine: mojeek
-    shortcut: mj
-    timeout: 10.0
+  # 知识类
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    timeout: 5.0
+    disabled: false
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    timeout: 5.0
+    disabled: false
