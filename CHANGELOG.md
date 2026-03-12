@@ -1,5 +1,84 @@
 # Memoh-v2 更新日志
 
+## [2026-03-12] 重构企业微信流式消息 - 严格遵循 SDK 规范
+
+### 问题描述
+企业微信端收到的流式消息存在以下问题：
+1. **消息"撤回"现象**：流式输出过程中内容突然消失，回到"思考中..."状态
+2. **内容截断或不完整**：长消息发送失败或显示异常
+3. **发送速度问题**：要么逐字卡顿，要么 fire-and-forget 模式与 SDK 串行队列冲突
+
+### SDK 规范深度分析
+**官方 SDK 关键要点 (`aibot-node-sdk-main/src/client.ts:169-190`)：**
+```typescript
+replyStream(frame, streamId, content, finish = false): Promise<WsFrame> {
+  const stream = {
+    id: streamId,
+    finish,
+    content,  // ← 每次发送都是完整内容，不是增量！
+  };
+  return this.reply(frame, { msgtype: 'stream', stream });
+}
+```
+
+**核心发现：**
+1. SDK 每次发送的都是**完整 content**，不是增量 delta
+2. SDK 使用**串行队列**发送消息，每条消息等待 ACK 后才发送下一条
+3. ACK 超时时间为 **5 秒** (`ws.ts:55`)
+4. 单条消息内容限制：**20480 字节** (UTF-8 编码)
+
+### 根本原因
+1. **增量发送模式错误**：当前实现只发送新增内容 (`len(content) > lastSentLen`)，与 SDK 规范不符
+2. **复杂分片机制问题**：`sendSplitContent` 将长消息分片，中间失败导致消息异常
+3. **fire-and-forget 冲突**：绕过 SDK 串行队列的设计，导致消息顺序和状态异常
+
+### 解决方案：严格遵循 SDK 规范重构
+
+#### 1. 完整内容刷新模式
+- 每次发送都包含**当前所有完整内容**，不是增量
+- 企业微信端会自动处理内容更新显示
+
+#### 2. 智能截断而非分片
+- 内容超过 20480 字节时，直接截断到 20400 字节
+- 添加 `"[内容过长，已截断显示，请查看完整回复]"` 提示
+- **确保用户至少能看到部分内容**，而不是消息消失
+
+#### 3. 统一使用 SDK 串行队列
+- 移除 `SendStreamFireAndForget` 方法
+- 所有消息统一使用 `SendStream`，遵循 SDK 的 ACK 等待机制
+- ACK 超时时间：5 秒（与 SDK 一致）
+
+#### 4. 发送频率控制
+- 最小发送间隔：600ms（从 300ms 增加）
+- 减少消息数量，降低 ACK 等待开销
+- 使用 `lastSentContent` 跟踪已发送内容，避免重复发送
+
+### 修改内容
+
+**文件 1：** `internal/channel/adapters/wecom/stream.go`
+- 重写 `flushBuffer`：改为发送完整内容，600ms 频率控制
+- 新增 `sendFullContent`：统一发送逻辑，智能截断处理
+- 删除 `sendSplitContent` 和 `sendChunk`：移除复杂分片机制
+- 删除 `lastSentLen`：不再需要增量跟踪
+
+**文件 2：** `internal/channel/adapters/wecom/websocket.go`
+- 删除 `SendStreamFireAndForget` 方法
+- ACK 超时时间保持 5 秒（与 SDK 一致）
+
+### 技术亮点
+1. **符合 SDK 规范**：严格遵循官方 SDK 的设计模式
+2. **消息不消失**：即使最终消息失败，已发送的内容仍保留
+3. **长消息处理**：智能截断确保用户能看到部分内容
+4. **频率优化**：600ms 间隔平衡实时性和性能
+
+### 验证结果
+- ✅ 编译通过，`docker build` 成功
+- ✅ 服务重启正常，WeCom 连接建立成功
+- ✅ 短消息（< 20480 字节）完整显示
+- ✅ 长消息（> 20480 字节）截断显示并附带提示
+
+---
+
 ## [2026-03-12] 修复 SearXNG 网络搜索工具问题
 
 ### 问题描述

@@ -640,51 +640,6 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 	})
 }
 
-// SendStreamFireAndForget sends a stream message without waiting for ACK.
-// This is used for intermediate stream updates (finish=false) to ensure smooth streaming.
-// The message is sent directly without queuing, providing best-effort delivery.
-// For final messages (finish=true), use SendStream instead to ensure delivery.
-func (c *WebSocketClient) SendStreamFireAndForget(reqID string, body StreamMsgBody, cmd ...string) error {
-	// Determine which command to use
-	cmdToUse := CmdRespondMsg
-	if len(cmd) > 0 && cmd[0] != "" {
-		cmdToUse = cmd[0]
-	}
-
-	c.mu.RLock()
-	conn := c.conn
-	connected := c.connected
-	c.mu.RUnlock()
-
-	if !connected || conn == nil {
-		return fmt.Errorf("websocket not connected")
-	}
-
-	frame := WebsocketMessage{
-		Cmd:     cmdToUse,
-		Headers: MessageHeaders{ReqID: reqID},
-	}
-
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal stream body failed: %w", err)
-	}
-	frame.Body = bodyBytes
-
-	// Send directly without queuing or waiting for ACK
-	if err := conn.WriteJSON(frame); err != nil {
-		return fmt.Errorf("write stream message: %w", err)
-	}
-
-	c.logger.Debug("stream message sent (fire-and-forget)",
-		slog.String("req_id", reqID),
-		slog.String("stream_id", body.Stream.ID),
-		slog.Bool("finish", body.Stream.Finish),
-		slog.Int("content_bytes", len(body.Stream.Content)))
-
-	return nil
-}
-
 // processReplyQueue processes the reply queue for a specific req_id
 // All messages wait for ACK before continuing to ensure delivery and order.
 func (c *WebSocketClient) processReplyQueue(reqID string) {

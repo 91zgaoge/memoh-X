@@ -14,6 +14,7 @@ import (
 
 // OutboundStream implements channel.OutboundStream for WeCom
 // Supports real-time streaming output using WeCom's stream message format
+// Following SDK specification: always send full content, not delta
 type OutboundStream struct {
 	adapter         *Adapter
 	cfg             channel.ChannelConfig
@@ -30,13 +31,16 @@ type OutboundStream struct {
 	sent            atomic.Bool
 	streamID        string
 	mu              sync.Mutex
-	lastSentLen     int
 	streamStartTime time.Time // 流式消息开始时间，用于6分钟超时检查
 
 	// Buffered sending mechanism
 	ticker          *time.Ticker
 	stopTicker      chan struct{}
 	pendingSend     atomic.Bool
+
+	// Track last sent content and time for rate limiting
+	lastSentContent string
+	lastSendTime    time.Time
 }
 
 // StreamTimeout 流式消息超时时间（6分钟）
@@ -45,8 +49,8 @@ const StreamTimeout = 6 * time.Minute
 // MaxContentBytes 单条消息最大字节数（企业微信 AI Bot SDK 限制：20480 字节）
 const MaxContentBytes = 20480
 
-// SendInterval 流式消息发送间隔（合并多个delta后批量发送）
-const SendInterval = 300 * time.Millisecond // 300ms合并发送一次
+// MinSendInterval 流式消息最小发送间隔（控制发送频率，避免过多消息）
+const MinSendInterval = 600 * time.Millisecond // 600ms，与流畅性和实时性平衡
 
 // NewOutboundStream creates a new outbound stream
 func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger) *OutboundStream {
@@ -68,10 +72,11 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
 		streamStartTime: time.Now(),
 		stopTicker:      make(chan struct{}),
+		lastSendTime:    time.Now(),
 	}
 
 	// Start background ticker for buffered sending
-	s.ticker = time.NewTicker(SendInterval)
+	s.ticker = time.NewTicker(MinSendInterval)
 	go s.sendLoop()
 
 	return s
@@ -91,7 +96,7 @@ func (s *OutboundStream) sendLoop() {
 }
 
 // flushBuffer sends the current buffer content if there's anything new
-// Uses fire-and-forget mode for intermediate updates to ensure smooth streaming
+// Following SDK spec: send full content, not delta
 func (s *OutboundStream) flushBuffer() {
 	if s.closed.Load() {
 		return
@@ -99,20 +104,31 @@ func (s *OutboundStream) flushBuffer() {
 
 	s.mu.Lock()
 	content := s.buffer.String()
+	lastSent := s.lastSentContent
 	s.mu.Unlock()
 
-	// Only send if there's new content since last send
-	if len(content) > s.lastSentLen {
-		// Use background context with short timeout for fire-and-forget
-		// This ensures we don't block the stream waiting for ACK
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	// Only send if content has changed since last send
+	if content == "" || content == lastSent {
+		return
+	}
 
-		// Send as intermediate update (finish=false) using fire-and-forget mode
-		// Errors are logged but don't interrupt the stream
-		if err := s.sendStreamUpdate(ctx, content, false); err != nil {
-			s.logger.Debug("buffered send failed (non-critical)", slog.Any("error", err))
-		}
+	// Check if enough time has passed since last send
+	if time.Since(s.lastSendTime) < MinSendInterval {
+		return
+	}
+
+	// Use background context with timeout for sending
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Send as intermediate update (finish=false) with full content
+	if err := s.sendFullContent(ctx, content, false); err != nil {
+		s.logger.Debug("buffered send failed (non-critical)", slog.Any("error", err))
+	} else {
+		s.mu.Lock()
+		s.lastSentContent = content
+		s.lastSendTime = time.Now()
+		s.mu.Unlock()
 	}
 }
 
@@ -134,7 +150,6 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 		if time.Since(s.streamStartTime) > StreamTimeout {
 			s.logger.Warn("stream timeout: exceeding 6 minute limit, forcing finish",
 				slog.Duration("elapsed", time.Since(s.streamStartTime)))
-			// Send final response with timeout message
 			s.mu.Lock()
 			content := s.buffer.String()
 			if content == "" {
@@ -143,7 +158,7 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			s.mu.Unlock()
 			s.closed.Store(true)
 			close(s.stopTicker)
-			return s.sendStreamUpdate(ctx, content, true)
+			return s.sendFullContent(ctx, content, true)
 		}
 
 		s.mu.Lock()
@@ -171,7 +186,7 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 		}
 
 		// Send final response with finish=true
-		return s.sendStreamUpdate(ctx, finalContent, true)
+		return s.sendFullContent(ctx, finalContent, true)
 
 	case channel.StreamEventError:
 		// Stop the ticker
@@ -186,7 +201,7 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 		// Send error response immediately with finish=true
 		if !s.sent.Load() {
-			if err := s.sendStreamUpdate(ctx, errorMsg, true); err != nil {
+			if err := s.sendFullContent(ctx, errorMsg, true); err != nil {
 				s.logger.Error("failed to send error response", slog.Any("error", err))
 				return err
 			}
@@ -200,159 +215,39 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 	return nil
 }
 
-// sendStreamUpdate sends a stream update to WeCom
-func (s *OutboundStream) sendStreamUpdate(ctx context.Context, content string, finish bool) error {
+// sendFullContent sends the full content to WeCom
+// Following SDK specification: always send complete content, not delta
+// If content exceeds MaxContentBytes, it will be truncated with a notice
+func (s *OutboundStream) sendFullContent(ctx context.Context, content string, finish bool) error {
 	// Don't send empty content unless it's the final message
 	if content == "" && !finish {
 		return nil
 	}
 
 	// Check if content exceeds byte limit (WeCom AI Bot SDK limit: 20480 bytes)
-	contentBytes := []byte(content)
-	if len(contentBytes) > MaxContentBytes {
-		// Content too long, need to split and send in chunks
-		// Note: sendSplitContent handles its own locking
-		return s.sendSplitContent(ctx, content, finish)
+	// If so, truncate it and add a notice
+	truncatedContent, wasTruncated := s.truncateToMaxBytes(content, MaxContentBytes-100) // Reserve space for notice
+	if wasTruncated && finish {
+		truncatedContent += "\n\n[内容过长，已截断显示，请查看完整回复]"
 	}
 
-	// Send normally
-	return s.sendSingleUpdate(ctx, content, finish)
-}
-
-// sendSplitContent splits long content into multiple messages and sends them sequentially.
-// CRITICAL: All chunks must use the SAME streamID and reqID as the original message.
-// WeCom identifies a stream sequence by (req_id, stream.id) pair.
-func (s *OutboundStream) sendSplitContent(ctx context.Context, content string, finish bool) error {
-	chunks := splitContentByBytes(content, MaxContentBytes-100) // Reserve space for continuation indicator
-
-	s.logger.Info("splitting long content into chunks",
-		slog.Int("total_chunks", len(chunks)),
-		slog.Int("total_bytes", len(content)),
-		slog.String("stream_id", s.streamID),
-		slog.String("req_id", s.reqID))
-
-	// IMPORTANT: Use the original streamID for all chunks
-	// This ensures WeCom recognizes them as the same stream sequence
-	for i, chunk := range chunks {
-		isLastChunk := (i == len(chunks)-1)
-
-		// Add continuation indicator if not the last chunk
-		if !isLastChunk {
-			chunk = chunk + "\n\n...(继续)"
-		}
-
-		// For split content:
-		// - Intermediate chunks: finish=false (will wait for ACK)
-		// - Last chunk: use the original finish value
-		chunkFinish := isLastChunk && finish
-
-		s.logger.Debug("sending chunk",
-			slog.Int("chunk_index", i+1),
-			slog.Int("total_chunks", len(chunks)),
-			slog.Bool("is_last", isLastChunk),
-			slog.Bool("finish", chunkFinish),
-			slog.Int("content_bytes", len(chunk)))
-
-		if err := s.sendChunk(ctx, chunk, chunkFinish); err != nil {
-			s.logger.Error("failed to send chunk",
-				slog.Int("chunk_index", i+1),
-				slog.Any("error", err))
-			return fmt.Errorf("send chunk %d/%d: %w", i+1, len(chunks), err)
-		}
-
-		// Add delay between chunks to avoid rate limiting
-		// WeCom limit: 30 messages/minute
-		if !isLastChunk {
-			time.Sleep(300 * time.Millisecond)
-		}
-	}
-
-	s.logger.Info("all chunks sent successfully",
-		slog.Int("total_chunks", len(chunks)),
-		slog.String("stream_id", s.streamID))
-
-	return nil
-}
-
-// sendChunk sends a single chunk using the original streamID
-// Uses dual-mode strategy:
-//   - Intermediate chunks (finish=false): fire-and-forget for smooth streaming
-//   - Final chunk (finish=true): wait for ACK to ensure delivery
-func (s *OutboundStream) sendChunk(ctx context.Context, content string, finish bool) error {
 	s.mu.Lock()
-
-	if s.wsClient == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("websocket client is nil")
-	}
-
 	wsClient := s.wsClient
 	streamID := s.streamID
 	reqID := s.reqID
 	chatType := s.chatType
 	isMentioned := s.isMentioned
-
 	s.mu.Unlock()
 
-	// Send stream update using WeCom stream format
-	body := StreamMsgBody{
-		MsgType: MsgTypeStream,
-		Stream: StreamResponse{
-			ID:      streamID, // Use the original streamID!
-			Finish:  finish,
-			Content: content,
-		},
-	}
-
-	// Determine which command to use based on chat type and mention status
-	cmd := CmdRespondMsg
-	if chatType == "group" && !isMentioned {
-		cmd = CmdSendMsg
-	}
-
-	// Dual-mode sending strategy for chunks
-	if finish {
-		// Final chunk: wait for ACK to ensure delivery
-		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
-			return fmt.Errorf("send chunk: %w", err)
-		}
-		s.sent.Store(true)
-		s.logger.Info("final chunk sent successfully",
-			slog.String("stream_id", streamID),
-			slog.Int("content_bytes", len(content)))
-	} else {
-		// Intermediate chunk: fire-and-forget for speed
-		if err := wsClient.SendStreamFireAndForget(reqID, body, cmd); err != nil {
-			return fmt.Errorf("send chunk: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// sendSingleUpdate sends a single stream update to WeCom
-// Uses dual-mode strategy:
-//   - Intermediate updates (finish=false): fire-and-forget for smooth streaming
-//   - Final message (finish=true): wait for ACK to ensure delivery
-func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, finish bool) error {
-	s.mu.Lock()
-
-	if s.wsClient == nil {
-		s.mu.Unlock()
+	if wsClient == nil {
 		return fmt.Errorf("websocket client is nil")
 	}
-
-	wsClient := s.wsClient
-	streamID := s.streamID
-	reqID := s.reqID
-	chatType := s.chatType
-	isMentioned := s.isMentioned
-
-	s.mu.Unlock()
 
 	s.logger.Debug("sending stream update",
 		slog.String("stream_id", streamID),
-		slog.Int("content_bytes", len(content)),
+		slog.Int("content_bytes", len(truncatedContent)),
+		slog.Int("original_bytes", len(content)),
+		slog.Bool("was_truncated", wasTruncated),
 		slog.Bool("finish", finish))
 
 	// Send stream update using WeCom stream format
@@ -361,7 +256,7 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 		Stream: StreamResponse{
 			ID:      streamID,
 			Finish:  finish,
-			Content: content,
+			Content: truncatedContent, // Send FULL content, not delta
 		},
 	}
 
@@ -377,33 +272,23 @@ func (s *OutboundStream) sendSingleUpdate(ctx context.Context, content string, f
 			slog.Bool("is_mentioned", isMentioned))
 	}
 
-	// Dual-mode sending strategy:
-	// - Intermediate updates: use fire-and-forget for smooth streaming experience
-	// - Final message: use ACK-wait to ensure delivery
+	// Send message (wait for ACK as per SDK specification)
+	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+		return fmt.Errorf("send stream update: %w", err)
+	}
+
 	if finish {
-		// Final message: wait for ACK to ensure delivery
-		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
-			return fmt.Errorf("send stream update: %w", err)
-		}
 		s.sent.Store(true)
 		s.logger.Info("final stream response sent successfully",
 			slog.String("stream_id", streamID),
 			slog.String("cmd", cmd),
-			slog.Int("content_bytes", len(content)))
+			slog.Int("content_bytes", len(truncatedContent)),
+			slog.Bool("was_truncated", wasTruncated))
 	} else {
-		// Intermediate update: fire-and-forget for speed
-		// Errors are logged but not returned to avoid disrupting the stream
-		if err := wsClient.SendStreamFireAndForget(reqID, body, cmd); err != nil {
-			s.logger.Debug("intermediate update send failed (non-critical)",
-				slog.Any("error", err),
-				slog.String("stream_id", streamID))
-			// Don't return error for intermediate updates - keep streaming
-		}
+		s.logger.Debug("intermediate stream update sent",
+			slog.String("stream_id", streamID),
+			slog.Int("content_bytes", len(truncatedContent)))
 	}
-
-	s.mu.Lock()
-	s.lastSentLen = len(content)
-	s.mu.Unlock()
 
 	return nil
 }
@@ -432,7 +317,7 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 	}
 
 	// Send final response with finish=true
-	return s.sendStreamUpdate(ctx, content, true)
+	return s.sendFullContent(ctx, content, true)
 }
 
 // generateStreamID generates a unique stream ID
@@ -440,74 +325,25 @@ func generateStreamID() string {
 	return fmt.Sprintf("stream_%d", time.Now().UnixNano())
 }
 
-// splitContentByBytes splits content into chunks respecting byte limit.
-// It prioritizes splitting at paragraph boundaries, then line boundaries,
-// then sentence boundaries, and finally at word boundaries.
-func splitContentByBytes(content string, maxBytes int) []string {
+// truncateToMaxBytes truncates content to maxBytes while preserving UTF-8 integrity
+// Returns the truncated content and a boolean indicating if truncation occurred
+func (s *OutboundStream) truncateToMaxBytes(content string, maxBytes int) (string, bool) {
 	contentBytes := []byte(content)
 	if len(contentBytes) <= maxBytes {
-		return []string{content}
+		return content, false
 	}
 
-	var chunks []string
-	remaining := content
-
-	for len(remaining) > 0 {
-		remainingBytes := []byte(remaining)
-		if len(remainingBytes) <= maxBytes {
-			chunks = append(chunks, remaining)
-			break
-		}
-
-		// Find the best split point within maxBytes
-		chunk := truncateByBytes(remaining, maxBytes)
-
-		// Try to split at paragraph boundary (\n\n)
-		if idx := strings.LastIndex(chunk, "\n\n"); idx > maxBytes/2 {
-			chunk = remaining[:idx]
-			chunks = append(chunks, chunk)
-			remaining = remaining[idx+2:]
-			continue
-		}
-
-		// Try to split at line boundary (\n)
-		if idx := strings.LastIndex(chunk, "\n"); idx > maxBytes/2 {
-			chunk = remaining[:idx]
-			chunks = append(chunks, chunk)
-			remaining = remaining[idx+1:]
-			continue
-		}
-
-		// Try to split at sentence boundary (Chinese and English punctuation)
-		if idx := strings.LastIndexAny(chunk, "。！？.!?"); idx > maxBytes/2 {
-			chunk = remaining[:idx+1]
-			chunks = append(chunks, chunk)
-			remaining = remaining[idx+1:]
-			continue
-		}
-
-		// Force split (ensure we don't cut a UTF-8 character)
-		chunks = append(chunks, chunk)
-		remaining = remaining[len(chunk):]
-	}
-
-	return chunks
-}
-
-// truncateByBytes truncates a string to maxBytes without breaking UTF-8 characters.
-// It looks backward from maxBytes to find a valid UTF-8 character boundary.
-func truncateByBytes(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-
-	// Look backward to find a valid UTF-8 character boundary
+	// Truncate to maxBytes, ensuring we don't cut a UTF-8 character
 	// In UTF-8, continuation bytes start with 10xxxxxx (0x80-0xBF)
 	// Non-continuation bytes start with 0xxxxxxx (0x00-0x7F) or 11xxxxxx (0xC0-0xFF)
-	for i := maxBytes; i > maxBytes-4 && i > 0; i-- {
-		if (s[i] & 0xC0) != 0x80 {
-			return s[:i]
+	truncateAt := maxBytes
+	for truncateAt > maxBytes-4 && truncateAt > 0 {
+		if (contentBytes[truncateAt] & 0xC0) != 0x80 {
+			// Found a non-continuation byte, safe to truncate here
+			break
 		}
+		truncateAt--
 	}
-	return s[:maxBytes]
+
+	return string(contentBytes[:truncateAt]), true
 }
