@@ -1,0 +1,18 @@
+Metadata-Version: 2.1
+Name: volcengine
+Version: 1.0.216
+Summary: The Volcengine SDK for Python
+Home-page: https://github.com/Volcengine/volc-sdk-python
+Author: Volcengine SDK
+License: MIT License
+Keywords: pip,volcengine,volc-sdk-python
+Platform: any
+License-File: LICENSE
+Requires-Dist: google (>=3.0.0)
+Requires-Dist: protobuf (>=3.18.3)
+Requires-Dist: pycryptodome (<4.0.0,>=3.9.9)
+Requires-Dist: pytz (>=2020.5)
+Requires-Dist: requests (>=2.25.1)
+Requires-Dist: retry (<1.0.0,>=0.9.2)
+Requires-Dist: six (>=1.0)
+

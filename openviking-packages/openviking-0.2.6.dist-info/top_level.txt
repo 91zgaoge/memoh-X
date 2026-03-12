@@ -1,0 +1,3 @@
+openviking
+openviking_cli
+vikingbot

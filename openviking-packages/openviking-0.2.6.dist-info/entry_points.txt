@@ -1,0 +1,5 @@
+[console_scripts]
+openviking = openviking_cli.rust_cli:main
+openviking-server = openviking_cli.server_bootstrap:main
+ov = openviking_cli.rust_cli:main
+vikingbot = vikingbot.cli.commands:app

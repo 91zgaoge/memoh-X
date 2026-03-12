@@ -123,7 +123,11 @@ func (s *OutboundStream) flushBuffer() {
 
 	// Send as intermediate update (finish=false) with full content
 	if err := s.sendFullContent(ctx, content, false); err != nil {
-		s.logger.Debug("buffered send failed (non-critical)", slog.Any("error", err))
+		// Log error but DON'T update lastSentContent so we can retry on next tick
+		// This ensures we don't "retract" content by failing to send updates
+		s.logger.Warn("buffered send failed, will retry on next tick",
+			slog.Any("error", err),
+			slog.Int("content_len", len(content)))
 	} else {
 		s.mu.Lock()
 		s.lastSentContent = content
@@ -169,7 +173,7 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			slog.Int("delta_len", len(event.Delta)))
 
 	case channel.StreamEventFinal:
-		// Stop the ticker first
+		// Stop the ticker first to prevent any further intermediate updates
 		close(s.stopTicker)
 
 		var finalContent string
@@ -185,8 +189,39 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			s.mu.Unlock()
 		}
 
-		// Send final response with finish=true
-		return s.sendFullContent(ctx, finalContent, true)
+		// CRITICAL: Ensure final content is never shorter than what was already sent
+		// This prevents "retracting" the message
+		s.mu.Lock()
+		if len(finalContent) < len(s.lastSentContent) {
+			s.logger.Warn("final content shorter than last sent, using last sent content",
+				slog.Int("final_len", len(finalContent)),
+				slog.Int("last_sent_len", len(s.lastSentContent)))
+			finalContent = s.lastSentContent
+		}
+		s.mu.Unlock()
+
+		// CRITICAL: Ensure final content is never empty
+		if finalContent == "" {
+			finalContent = "处理完成，请查看完整回复。"
+			s.logger.Warn("final content was empty, using default message")
+		}
+
+		s.logger.Info("sending final message",
+			slog.Int("content_len", len(finalContent)),
+			slog.String("stream_id", s.streamID))
+
+		// Send final response with finish=true (with retries)
+		if err := s.sendFullContent(ctx, finalContent, true); err != nil {
+			s.logger.Error("failed to send final message even after retries", slog.Any("error", err))
+			return err
+		}
+
+		// Update lastSentContent to final content
+		s.mu.Lock()
+		s.lastSentContent = finalContent
+		s.mu.Unlock()
+
+		return nil
 
 	case channel.StreamEventError:
 		// Stop the ticker
@@ -201,7 +236,20 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 		// Send error response immediately with finish=true
 		if !s.sent.Load() {
-			if err := s.sendFullContent(ctx, errorMsg, true); err != nil {
+			// CRITICAL: Append error to existing content instead of replacing
+			// This prevents "retracting" the already visible content
+			s.mu.Lock()
+			existingContent := s.buffer.String()
+			s.mu.Unlock()
+
+			var finalMsg string
+			if existingContent != "" {
+				finalMsg = existingContent + "\n\n[系统提示: " + errorMsg + "]"
+			} else {
+				finalMsg = errorMsg
+			}
+
+			if err := s.sendFullContent(ctx, finalMsg, true); err != nil {
 				s.logger.Error("failed to send error response", slog.Any("error", err))
 				return err
 			}
@@ -219,9 +267,16 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 // Following SDK specification: always send complete content, not delta
 // If content exceeds MaxContentBytes, it will be truncated with a notice
 func (s *OutboundStream) sendFullContent(ctx context.Context, content string, finish bool) error {
-	// Don't send empty content unless it's the final message
+	// CRITICAL: Never send empty content for intermediate updates
 	if content == "" && !finish {
 		return nil
+	}
+
+	// CRITICAL: For final message, ensure content is never empty
+	// This prevents "retracting" the message to empty state
+	if finish && content == "" {
+		content = "处理完成，请查看完整回复。"
+		s.logger.Warn("final message content was empty, using default")
 	}
 
 	// Check if content exceeds byte limit (WeCom AI Bot SDK limit: 20480 bytes)
@@ -273,24 +328,49 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 	}
 
 	// Send message (wait for ACK as per SDK specification)
-	if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
-		return fmt.Errorf("send stream update: %w", err)
-	}
-
+	// For final messages, retry on failure to ensure visibility
+	var lastErr error
+	maxRetries := 1
 	if finish {
-		s.sent.Store(true)
-		s.logger.Info("final stream response sent successfully",
-			slog.String("stream_id", streamID),
-			slog.String("cmd", cmd),
-			slog.Int("content_bytes", len(truncatedContent)),
-			slog.Bool("was_truncated", wasTruncated))
-	} else {
-		s.logger.Debug("intermediate stream update sent",
-			slog.String("stream_id", streamID),
-			slog.Int("content_bytes", len(truncatedContent)))
+		maxRetries = 2 // Retry final messages more aggressively
 	}
 
-	return nil
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			s.logger.Info("retrying send",
+				slog.Int("attempt", attempt+1),
+				slog.Int("max_retries", maxRetries),
+				slog.Bool("finish", finish))
+			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+		}
+
+		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+			lastErr = err
+			s.logger.Warn("send attempt failed",
+				slog.Int("attempt", attempt+1),
+				slog.Bool("finish", finish),
+				slog.Any("error", err))
+			continue
+		}
+
+		// Success
+		if finish {
+			s.sent.Store(true)
+			s.logger.Info("final stream response sent successfully",
+				slog.String("stream_id", streamID),
+				slog.String("cmd", cmd),
+				slog.Int("content_bytes", len(truncatedContent)),
+				slog.Bool("was_truncated", wasTruncated),
+				slog.Int("attempts", attempt+1))
+		} else {
+			s.logger.Debug("intermediate stream update sent",
+				slog.String("stream_id", streamID),
+				slog.Int("content_bytes", len(truncatedContent)))
+		}
+		return nil
+	}
+
+	return fmt.Errorf("send stream update failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // Close sends the final response and closes the stream
@@ -310,13 +390,23 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 
 	s.mu.Lock()
 	content := s.buffer.String()
+	// CRITICAL: Ensure we don't send shorter content than already sent
+	if len(content) < len(s.lastSentContent) {
+		s.logger.Warn("close content shorter than last sent, using last sent",
+			slog.Int("content_len", len(content)),
+			slog.Int("last_sent_len", len(s.lastSentContent)))
+		content = s.lastSentContent
+	}
 	s.mu.Unlock()
 
+	// CRITICAL: Never send empty final message
 	if content == "" {
-		content = "处理完成，但没有生成回复内容。"
+		content = "处理完成，请查看完整回复。"
+		s.logger.Warn("close content was empty, using default message")
 	}
 
-	// Send final response with finish=true
+	// Send final response with finish=true (with retries)
+	s.logger.Info("closing stream with final message", slog.Int("content_len", len(content)))
 	return s.sendFullContent(ctx, content, true)
 }
 

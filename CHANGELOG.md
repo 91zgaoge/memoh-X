@@ -1,5 +1,65 @@
 # Memoh-v2 更新日志
 
+## [2026-03-12] 修复消息"回撤"问题 - 可见性保护机制
+
+### 问题本质分析
+用户反馈：流式输出过程中，内容会"突然像撤回消息一样，全部消失，回到最初的'收到！正在为您...。。'"
+
+**根本原因：**
+1. **最终消息内容为空或极短**：当 `finish=true` 的消息 content 为空或比已显示内容短时，企业微信端会"回撤"显示
+2. **ACK 超时无重试**：关键消息（final）发送失败后没有重试机制
+3. **错误消息覆盖已有内容**：`StreamEventError` 处理直接发送错误消息，替换了已显示的流式内容
+
+### 解决方案：可见性保护机制
+
+#### 1. 禁止空内容发送
+```go
+// 强制要求 final message 必须有内容
+if finish && content == "" {
+    content = "处理完成，请查看完整回复。"
+}
+```
+
+#### 2. 内容长度保护
+```go
+// 禁止发送比已显示内容更短的消息
+if len(finalContent) < len(s.lastSentContent) {
+    finalContent = s.lastSentContent  // 使用已发送的内容
+}
+```
+
+#### 3. 最终消息重试机制
+```go
+// Final 消息失败时自动重试（最多2次）
+maxRetries := 2
+for attempt := 0; attempt < maxRetries; attempt++ {
+    if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
+        // 重试...
+    }
+}
+```
+
+#### 4. 错误消息追加而非替换
+```go
+// 错误时保留已有内容，追加错误提示
+if existingContent != "" {
+    finalMsg = existingContent + "\n\n[系统提示: " + errorMsg + "]"
+}
+```
+
+### 修改文件
+**`internal/channel/adapters/wecom/stream.go`**：
+- `sendFullContent`: 添加空内容检查和重试机制
+- `StreamEventFinal`: 添加内容长度保护
+- `StreamEventError`: 改为追加错误提示而非替换
+- `Close`: 添加内容长度保护
+- `flushBuffer`: 改进失败日志记录
+
+### 核心原则
+**宁可显示旧内容，也不发送空内容导致"回撤"**
+
+---
+
 ## [2026-03-12] 重构企业微信流式消息 - 严格遵循 SDK 规范
 
 ### 问题描述
