@@ -36,6 +36,7 @@ type OutboundStream struct {
 	// Buffered sending mechanism
 	ticker          *time.Ticker
 	stopTicker      chan struct{}
+	stopTickerOnce  sync.Once // CRITICAL: 确保 stopTicker 只被关闭一次
 	pendingSend     atomic.Bool
 
 	// Track last sent content and time for rate limiting
@@ -217,7 +218,10 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			}
 
 			s.closed.Store(true)
-			close(s.stopTicker)
+			// CRITICAL: Use sync.Once to ensure stopTicker is closed only once
+			s.stopTickerOnce.Do(func() {
+				close(s.stopTicker)
+			})
 			s.sendFullContent(ctx, content, true)
 			return nil
 		}
@@ -231,11 +235,34 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 	case channel.StreamEventFinal:
 		// Stop the ticker first to prevent any further intermediate updates
-		close(s.stopTicker)
+		// CRITICAL: Use sync.Once to ensure stopTicker is closed only once
+		s.stopTickerOnce.Do(func() {
+			close(s.stopTicker)
+		})
 
 		var finalContent string
 		if event.Final != nil && event.Final.Message.Text != "" {
-			finalContent = event.Final.Message.Text
+			// CRITICAL: Strip think tags from final content as well
+			// The LLM may include <think> tags in the final response
+			strippedFinal := stripThinkTags(event.Final.Message.Text)
+
+			s.mu.Lock()
+			bufferContent := s.buffer.String()
+			s.mu.Unlock()
+
+			// CRITICAL: Use the longer content to prevent truncation
+			// Sometimes LLM returns a shortened version in Final event
+			// CRITICAL: Always strip think tags from buffer content too!
+			strippedBuffer := stripThinkTags(bufferContent)
+			if len(strippedFinal) < len(strippedBuffer) {
+				s.logger.Warn("final content shorter than buffer, using buffer",
+					slog.Int("final_len", len(strippedFinal)),
+					slog.Int("buffer_len", len(strippedBuffer)))
+				finalContent = strippedBuffer
+			} else {
+				finalContent = strippedFinal
+			}
+
 			s.mu.Lock()
 			s.buffer.Reset()
 			s.buffer.WriteString(finalContent)
@@ -282,7 +309,10 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 	case channel.StreamEventError:
 		// Stop the ticker
-		close(s.stopTicker)
+		// CRITICAL: Use sync.Once to ensure stopTicker is closed only once
+		s.stopTickerOnce.Do(func() {
+			close(s.stopTicker)
+		})
 
 		errorMsg := event.Error
 		if errorMsg == "" {
@@ -331,7 +361,7 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 // sendFullContent sends the full content to WeCom
 // Following SDK specification: always send complete content, not delta
-// If content exceeds MaxContentBytes, it will be truncated with a notice
+// If content exceeds MaxContentBytes, it will be sent using segmented sending
 func (s *OutboundStream) sendFullContent(ctx context.Context, content string, finish bool) error {
 	// CRITICAL: Never send empty content for intermediate updates
 	if content == "" && !finish {
@@ -371,8 +401,23 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 		s.mu.Unlock()
 	}
 
+	// CRITICAL: Strip think tags from content before sending
+	// This ensures no think tags appear in the final message
+	content = stripThinkTags(content)
+
 	// Check if content exceeds byte limit (WeCom AI Bot SDK limit: 20480 bytes)
-	// If so, truncate it and add a notice
+	contentBytes := []byte(content)
+
+	// 如果是最终消息且内容超过限制，使用分段发送
+	if finish && len(contentBytes) > MaxContentBytes {
+		s.logger.Info("content exceeds limit, using segmented send",
+			slog.Int("total_bytes", len(contentBytes)),
+			slog.Int("limit", MaxContentBytes),
+			slog.Int("estimated_segments", (len(contentBytes)/MaxContentBytes)+1))
+		return s.sendSegmentedContent(ctx, content)
+	}
+
+	// 短消息或中间更新：使用原有的截断逻辑
 	truncatedContent, wasTruncated := s.truncateToMaxBytes(content, MaxContentBytes-100) // Reserve space for notice
 	if wasTruncated && finish {
 		truncatedContent += "\n\n[内容过长，已截断显示，请查看完整回复]"
@@ -510,12 +555,10 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 	s.closed.Store(true)
 
 	// Stop the ticker
-	select {
-	case <-s.stopTicker:
-		// Already closed
-	default:
+	// CRITICAL: Use sync.Once to ensure stopTicker is closed only once
+	s.stopTickerOnce.Do(func() {
 		close(s.stopTicker)
-	}
+	})
 
 	s.mu.Lock()
 	content := s.buffer.String()
@@ -609,38 +652,42 @@ func isContentInThinkTags(content string) bool {
 // stripThinkTags removes think tags from content and returns the inner content
 // If no think tags are present, returns the original content
 // PRESERVES newlines and whitespace inside the content (only removes the tags themselves)
+// CRITICAL: Uses a loop to handle multiple think tag pairs
 func stripThinkTags(content string) string {
-	original := content
+	result := content
+	maxIterations := 100 // Prevent infinite loops
 
-	// Remove opening think tag if present at the beginning (after optional whitespace)
-	// We preserve leading whitespace/newlines by finding where <think> actually is
-	thinkStart := strings.Index(original, "<think>")
-	if thinkStart == -1 {
-		// No opening tag, return as-is
-		return original
+	for i := 0; i < maxIterations; i++ {
+		// Find opening think tag
+		thinkStart := strings.Index(result, "<think>")
+		if thinkStart == -1 {
+			// No more opening tags, we're done
+			break
+		}
+
+		// Find closing tag
+		thinkEnd := strings.Index(result[thinkStart:], "</think>")
+		if thinkEnd == -1 {
+			// No closing tag, malformed - remove just the opening tag and continue
+			result = result[:thinkStart] + result[thinkStart+7:]
+			continue
+		}
+		thinkEnd += thinkStart + 8 // Adjust for offset and length of </think>
+
+		// Extract content between tags
+		innerStart := thinkStart + 7 // Length of <think>
+		innerEnd := thinkEnd - 8     // Length of </think>
+
+		if innerStart >= innerEnd {
+			// Empty or malformed tags - just remove the tags
+			result = result[:thinkStart] + result[thinkEnd:]
+		} else {
+			innerContent := result[innerStart:innerEnd]
+			// Return: before <think> + inner content + after </think>
+			result = result[:thinkStart] + innerContent + result[thinkEnd:]
+		}
 	}
 
-	// Find closing tag
-	thinkEnd := strings.Index(original[thinkStart:], "</think>")
-	if thinkEnd == -1 {
-		// No closing tag, return as-is (malformed)
-		return original
-	}
-	thinkEnd += thinkStart + 8 // Adjust for offset and length of </think>
-
-	// Extract content between tags
-	innerStart := thinkStart + 7 // Length of <think>
-	innerEnd := thinkEnd - 8     // Length of </think>
-
-	if innerStart >= innerEnd {
-		// Empty or malformed tags
-		return original[:thinkStart] + original[thinkEnd:]
-	}
-
-	innerContent := original[innerStart:innerEnd]
-
-	// Return: before <think> + inner content + after </think>
-	result := original[:thinkStart] + innerContent + original[thinkEnd:]
 	return result
 }
 
@@ -655,4 +702,220 @@ func isEmptyContent(content string) bool {
 		}
 	}
 	return true
+}
+
+// ========== 长文本分段发送功能 ==========
+
+// splitContent 将内容按字节分段，每段不超过 maxBytes
+// 确保 UTF-8 字符完整性，不会在多字节字符中间截断
+func splitContent(content string, maxBytes int) []string {
+	contentBytes := []byte(content)
+	if len(contentBytes) <= maxBytes {
+		return []string{content}
+	}
+
+	var segments []string
+	start := 0
+
+	for start < len(contentBytes) {
+		end := start + maxBytes
+		if end > len(contentBytes) {
+			end = len(contentBytes)
+		}
+
+		// 调整 end 位置以确保不截断 UTF-8 字符
+		end = adjustToValidUTF8(contentBytes, start, end)
+
+		segments = append(segments, string(contentBytes[start:end]))
+		start = end
+	}
+
+	return segments
+}
+
+// adjustToValidUTF8 调整截断位置以确保 UTF-8 字符完整性
+// 返回调整后的 end 位置（保证不截断多字节字符）
+func adjustToValidUTF8(data []byte, start, end int) int {
+	if end >= len(data) {
+		return len(data)
+	}
+
+	// 从 end 位置向前查找，找到第一个非 continuation byte 的位置
+	// UTF-8 continuation bytes 以 10xxxxxx 开头 (0x80-0xBF)
+	// 非 continuation bytes: 0xxxxxxx (0x00-0x7F) 或 11xxxxxx (0xC0-0xFF)
+	for end > start && (data[end]&0xC0) == 0x80 {
+		end--
+	}
+
+	return end
+}
+
+// sendSegmentedContent 分段发送长内容
+// 第1段使用流式消息（finish=false），后续段使用独立消息（CmdSendMsg）
+// 每段间隔 3 秒以遵守频率限制
+func (s *OutboundStream) sendSegmentedContent(ctx context.Context, content string) error {
+	// CRITICAL: 再次确保 think 标签被清除
+	content = stripThinkTags(content)
+
+	// 预留空间给分段提示信息（约 100 字节）
+	maxSegmentBytes := MaxContentBytes - 200
+	segments := splitContent(content, maxSegmentBytes)
+
+	s.logger.Info("sending segmented content",
+		slog.Int("total_bytes", len([]byte(content))),
+		slog.Int("segments", len(segments)),
+		slog.Int("max_segment_bytes", maxSegmentBytes))
+
+	// 第1段：使用流式消息发送
+	// CRITICAL: 如果只有一段，使用 finish=true 结束流式消息
+	// 如果有多段，使用 finish=false，但后续通过单独的结束消息来关闭流
+	firstSegment := segments[0]
+	isSingleSegment := len(segments) == 1
+	if !isSingleSegment {
+		firstSegment += fmt.Sprintf("\n\n[共 %d 部分，此为第 1/%d 部分]", len(segments), len(segments))
+	}
+
+	// 只有一段时，使用 finish=true 结束流式消息
+	if err := s.sendStreamContent(ctx, firstSegment, isSingleSegment); err != nil {
+		s.logger.Error("failed to send first segment", slog.Any("error", err))
+		return err
+	}
+
+	s.logger.Info("first segment sent via stream",
+		slog.Int("segment", 1),
+		slog.Int("total", len(segments)),
+		slog.Bool("finish", isSingleSegment))
+
+	// 如果只有一段，已经用 finish=true 发送完成，无需后续处理
+	if isSingleSegment {
+		s.sent.Store(true)
+		return nil
+	}
+
+	// 后续段：使用独立消息（CmdSendMsg，新的 req_id）
+	for i := 1; i < len(segments); i++ {
+		// 频率控制：等待 3 秒（严格遵守 30条/分钟 = 每 2秒 1条，留有余量）
+		if i > 1 {
+			time.Sleep(3 * time.Second)
+		}
+
+		segment := segments[i]
+		if i < len(segments)-1 {
+			segment += fmt.Sprintf("\n\n[第 %d/%d 部分，未完待续...]", i+1, len(segments))
+		} else {
+			segment += fmt.Sprintf("\n\n[第 %d/%d 部分，回复完毕]", i+1, len(segments))
+		}
+
+		// CRITICAL: 检查内容长度，确保不超过限制
+		segmentBytes := []byte(segment)
+		if len(segmentBytes) > MaxContentBytes {
+			s.logger.Warn("segment too long, truncating",
+				slog.Int("segment", i+1),
+				slog.Int("original_bytes", len(segmentBytes)),
+				slog.Int("limit", MaxContentBytes))
+			truncatedSegment, _ := s.truncateToMaxBytes(segment, MaxContentBytes-100)
+			truncatedSegment += "\n\n[内容过长，已截断]"
+			segment = truncatedSegment
+		}
+
+		// 使用 CmdSendMsg 发送（新的 req_id）
+		if err := s.sendStandaloneMessage(ctx, segment); err != nil {
+			s.logger.Error("failed to send standalone segment",
+				slog.Int("segment", i+1),
+				slog.Any("error", err))
+			// 继续发送下一段，不要因单段失败而中断
+			continue
+		}
+
+		s.logger.Info("segment sent via standalone message",
+			slog.Int("segment", i+1),
+			slog.Int("total", len(segments)))
+	}
+
+	// CRITICAL: 发送一个空的 finish=true 消息来正式结束流式消息
+	// 内容保持为空或很短，避免覆盖第一段的内容
+	if err := s.sendStreamContent(ctx, "✓", true); err != nil {
+		s.logger.Warn("failed to send stream finish message", slog.Any("error", err))
+		// 不返回错误，因为主要内容已经发送成功
+	} else {
+		s.logger.Info("stream finished")
+	}
+
+	s.sent.Store(true)
+	return nil
+}
+
+// sendStreamContent 发送流式消息内容（原有的流式发送逻辑）
+func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, finish bool) error {
+	s.mu.Lock()
+	wsClient := s.wsClient
+	streamID := s.streamID
+	reqID := s.reqID
+	chatType := s.chatType
+	isMentioned := s.isMentioned
+	s.mu.Unlock()
+
+	if wsClient == nil {
+		return fmt.Errorf("websocket client is nil")
+	}
+
+	// 构建流式消息体
+	body := StreamMsgBody{
+		MsgType: MsgTypeStream,
+		Stream: StreamResponse{
+			ID:      streamID,
+			Finish:  finish,
+			Content: content,
+		},
+	}
+
+	// 确定命令类型
+	cmd := CmdRespondMsg
+	sendReqID := reqID
+	if chatType == "group" && !isMentioned {
+		cmd = CmdSendMsg
+		sendReqID = generateReqID(CmdSendMsg)
+	}
+
+	return wsClient.SendStream(ctx, sendReqID, body, cmd)
+}
+
+// sendStandaloneMessage 发送独立消息（使用 CmdSendMsg）
+// 用于分段发送的后续段落
+func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content string) error {
+	s.mu.Lock()
+	wsClient := s.wsClient
+	chatType := s.chatType
+	s.mu.Unlock()
+
+	if wsClient == nil {
+		return fmt.Errorf("websocket client is nil")
+	}
+
+	// 生成新的 req_id（CmdSendMsg 必须使用新的 req_id）
+	reqID := generateReqID(CmdSendMsg)
+
+	// 确定 chat_type
+	var chatTypeInt int
+	if chatType == "single" {
+		chatTypeInt = ChatTypeSingle
+	} else {
+		chatTypeInt = ChatTypeGroup
+	}
+
+	// 构建 Markdown 消息体
+	body := SendMarkdownMsgBody{
+		MsgType: MsgTypeMarkdown,
+		Markdown: MarkdownContent{
+			Content: content,
+		},
+		ChatType: chatTypeInt,
+	}
+
+	s.logger.Debug("sending standalone message",
+		slog.String("req_id", reqID),
+		slog.Int("chat_type", chatTypeInt),
+		slog.Int("content_bytes", len([]byte(content))))
+
+	return wsClient.SendReply(ctx, reqID, body, CmdSendMsg)
 }
