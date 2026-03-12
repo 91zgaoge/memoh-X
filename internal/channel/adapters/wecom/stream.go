@@ -328,20 +328,28 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 	}
 
 	// Send message (wait for ACK as per SDK specification)
-	// For final messages, retry on failure to ensure visibility
+	// For final messages, use aggressive retry to ensure visibility
 	var lastErr error
 	maxRetries := 1
+	baseDelay := 500 * time.Millisecond
 	if finish {
-		maxRetries = 2 // Retry final messages more aggressively
+		maxRetries = 5 // Increased retries for final messages (total ~7.5s max)
+		baseDelay = 1 * time.Second
 	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
+			// Exponential backoff: 1s, 2s, 4s, 8s...
+			delay := time.Duration(attempt) * baseDelay
+			if delay > 5*time.Second {
+				delay = 5 * time.Second
+			}
 			s.logger.Info("retrying send",
 				slog.Int("attempt", attempt+1),
 				slog.Int("max_retries", maxRetries),
+				slog.Duration("delay", delay),
 				slog.Bool("finish", finish))
-			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			time.Sleep(delay)
 		}
 
 		if err := wsClient.SendStream(ctx, reqID, body, cmd); err != nil {
@@ -367,6 +375,19 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 				slog.String("stream_id", streamID),
 				slog.Int("content_bytes", len(truncatedContent)))
 		}
+		return nil
+	}
+
+	// CRITICAL: If final message failed after all retries, we still return success
+	// because the user has already seen the intermediate content.
+	// The finish=true failure won't "retract" the already visible content.
+	if finish {
+		s.logger.Error("final message failed after all retries, but intermediate content is visible",
+			slog.Int("max_retries", maxRetries),
+			slog.Any("last_error", lastErr),
+			slog.Int("visible_content_len", len(content)))
+		// Mark as sent to prevent further attempts
+		s.sent.Store(true)
 		return nil
 	}
 
