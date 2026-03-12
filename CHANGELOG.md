@@ -1,5 +1,42 @@
 # Memoh-v2 更新日志
 
+## [2026-03-12] 修复 SearXNG 网络搜索工具问题
+
+### 问题描述
+内置网络搜索工具返回 "searxng: no results" 错误，导致无法获取搜索结果。
+
+### 根本原因分析
+**关键日志证据：**
+```
+ERROR:searx.engines.duckduckgo: CAPTCHA (wt-wt)
+ERROR:searx.engines.google: engine timeout
+ERROR:searx.engines.brave: HTTP requests timeout
+```
+
+**核心问题：**
+- 多个搜索引擎触发 CAPTCHA（DuckDuckGo、Startpage）
+- Google 引擎连接超时
+- 可用引擎太少导致某些查询返回空结果
+- SearXNG 默认超时时间（3秒）太短
+
+### 解决方案：优化 SearXNG 配置
+1. **增加超时时间**：从 3 秒增加到 10-15 秒
+2. **添加更多搜索引擎**：包括 Brave、Qwant、百度、搜狗等
+3. **优化连接池配置**：增加 pool_connections 和 pool_maxsize
+
+### 修改内容
+**文件：** `docker/config/searxng-settings.yml`
+- 增加 `outgoing.request_timeout: 10.0`
+- 增加更多搜索引擎引擎配置
+- 添加中文搜索引擎（百度、搜狗）
+
+### 验证结果
+- ✅ 中文搜索正常工作（返回 27-30 个结果）
+- ✅ 英文搜索正常工作
+- ✅ 多个搜索引擎可用（brave、startpage、wikipedia）
+
+---
+
 ## [2026-03-12] 修复企业微信流式消息 ACK 阻塞问题 - 真正双模式发送
 
 ### 问题描述

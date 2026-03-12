@@ -12,19 +12,77 @@ search:
     - html
     - json
 
+# HTTP proxy configuration for outbound requests
+outgoing:
+  # 增加超时时间以应对慢速网络
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  # 连接池设置
+  pool_connections: 100
+  pool_maxsize: 100
+  proxies:
+    http:
+      - http://ccd:88152353@10.71.252.4:10810
+    https:
+      - http://ccd:88152353@10.71.252.4:10810
+
 ui:
   static_use_hash: true
 
 engines:
+  # 主要搜索引擎 - 增加超时和重试
   - name: google
     engine: google
     shortcut: g
+    timeout: 10.0
+    # 使用多个 Google 域名以增加成功率
+    base_url: https://www.google.com
+
   - name: bing
     engine: bing
     shortcut: b
-  - name: duckduckgo
-    engine: duckduckgo
-    shortcut: ddg
+    timeout: 10.0
+    base_url: https://www.bing.com
+
+  - name: brave
+    engine: brave
+    shortcut: br
+    timeout: 10.0
+
+  # 备用搜索引擎
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    timeout: 10.0
+
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    timeout: 10.0
+
   - name: wikipedia
     engine: wikipedia
     shortcut: wp
+    timeout: 5.0
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    timeout: 5.0
+
+  # 中文搜索引擎
+  - name: baidu
+    engine: baidu
+    shortcut: bd
+    timeout: 10.0
+
+  - name: sogou
+    engine: sogou
+    shortcut: sg
+    timeout: 10.0
+
+  # 新闻/内容聚合
+  - name: mojeek
+    engine: mojeek
+    shortcut: mj
+    timeout: 10.0
