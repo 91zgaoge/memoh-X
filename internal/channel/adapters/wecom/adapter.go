@@ -196,6 +196,41 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 	}
 }
 
+// sendErrorReply sends an error response to cover the "thinking..." message
+// CRITICAL: This prevents the "thinking..." message from being left visible when handler fails
+func (a *Adapter) sendErrorReply(ctx context.Context, wsClient *WebSocketClient, reqID string, streamID string, errorMsg string) {
+	if wsClient == nil || reqID == "" {
+		return
+	}
+
+	// If no streamID provided, generate one (should not happen in normal flow)
+	if streamID == "" {
+		streamID = generateStreamID()
+	}
+
+	a.logger.Info("sending error reply to cover thinking message",
+		slog.String("req_id", reqID),
+		slog.String("stream_id", streamID),
+		slog.String("error", errorMsg))
+
+	// Send error message with finish=true to close the stream
+	errorBody := StreamMsgBody{
+		MsgType: MsgTypeStream,
+		Stream: StreamResponse{
+			ID:      streamID,
+			Finish:  true, // Finish the stream
+			Content: "[系统提示: " + errorMsg + "]",
+		},
+	}
+
+	// Try to send error reply, ignore error to prevent blocking
+	if err := wsClient.SendStream(ctx, reqID, errorBody); err != nil {
+		a.logger.Warn("failed to send error reply", slog.String("req_id", reqID), slog.Any("error", err))
+	} else {
+		a.logger.Info("error reply sent successfully", slog.String("req_id", reqID))
+	}
+}
+
 // Connect establishes a connection to WeCom WebSocket
 func (a *Adapter) Connect(ctx context.Context, cfg channel.ChannelConfig, handler channel.InboundHandler) (channel.Connection, error) {
 	config, err := ParseConfig(cfg.Credentials)
@@ -487,6 +522,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 				err := handler(ctx, cfg, msg)
 				if err != nil {
 					a.logger.Error("handler returned error", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+					// CRITICAL: Send error reply to cover "thinking..." message
+					a.sendErrorReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID, "处理出错，请重试")
 				} else {
 					a.logger.Info("handler completed successfully", slog.String("req_id", wsMsg.Headers.ReqID))
 				}
@@ -542,6 +579,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			err = handler(ctx, cfg, msg)
 			if err != nil {
 				a.logger.Error("handler returned error for image", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+				// CRITICAL: Send error reply to cover "thinking..." message
+				a.sendErrorReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID, "处理图片出错，请重试")
 			} else {
 				a.logger.Info("handler completed successfully for image", slog.String("req_id", wsMsg.Headers.ReqID))
 			}
@@ -616,7 +655,13 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
 			// Store streamID in message metadata so CreateOutboundStream can use it
 			msg.Metadata["stream_id"] = streamID
-			return handler(ctx, cfg, msg)
+			err = handler(ctx, cfg, msg)
+			if err != nil {
+				a.logger.Error("handler returned error for file", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+				// CRITICAL: Send error reply to cover "thinking..." message
+				a.sendErrorReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID, "处理文件出错，请重试")
+			}
+			return err
 		}
 
 	case MsgTypeVoice:
@@ -638,7 +683,13 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
 			// Store streamID in message metadata so CreateOutboundStream can use it
 			msg.Metadata["stream_id"] = streamID
-			return handler(ctx, cfg, msg)
+			err := handler(ctx, cfg, msg)
+			if err != nil {
+				a.logger.Error("handler returned error for voice", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+				// CRITICAL: Send error reply to cover "thinking..." message
+				a.sendErrorReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID, "处理语音出错，请重试")
+			}
+			return err
 		}
 
 	case MsgTypeMixed:
@@ -895,7 +946,13 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 	// Store streamID in message metadata so CreateOutboundStream can use it
 	msg.Metadata["stream_id"] = streamID
 
-	return handler(ctx, cfg, msg)
+	err := handler(ctx, cfg, msg)
+	if err != nil {
+		a.logger.Error("handler returned error for proactive message", slog.String("req_id", reqID), slog.Any("error", err))
+		// CRITICAL: Send error reply to cover "thinking..." message
+		a.sendErrorReply(ctx, wsClient, reqID, streamID, "发送消息出错，请重试")
+	}
+	return err
 }
 
 // DownloadResult holds the result of a file download including metadata
