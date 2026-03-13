@@ -32,9 +32,21 @@ WITH updated AS (
       chat_model_id = COALESCE(sqlc.narg(chat_model_id)::uuid, bots.chat_model_id),
       memory_model_id = COALESCE(sqlc.narg(memory_model_id)::uuid, bots.memory_model_id),
       embedding_model_id = COALESCE(sqlc.narg(embedding_model_id)::uuid, bots.embedding_model_id),
-      vlm_model_id = COALESCE(sqlc.narg(vlm_model_id)::uuid, bots.vlm_model_id),
-      background_model_id = COALESCE(sqlc.narg(background_model_id)::uuid, bots.background_model_id),
-      image_model_id = COALESCE(sqlc.narg(image_model_id)::uuid, bots.image_model_id),
+      vlm_model_id = CASE
+          WHEN sqlc.narg(vlm_model_id) IS NULL THEN bots.vlm_model_id
+          WHEN sqlc.narg(vlm_model_id)::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE sqlc.narg(vlm_model_id)::uuid
+      END,
+      background_model_id = CASE
+          WHEN sqlc.narg(background_model_id) IS NULL THEN bots.background_model_id
+          WHEN sqlc.narg(background_model_id)::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE sqlc.narg(background_model_id)::uuid
+      END,
+      image_model_id = CASE
+          WHEN sqlc.narg(image_model_id) IS NULL THEN bots.image_model_id
+          WHEN sqlc.narg(image_model_id)::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE sqlc.narg(image_model_id)::uuid
+      END,
       search_provider_id = COALESCE(sqlc.narg(search_provider_id)::uuid, bots.search_provider_id),
       updated_at = now()
   WHERE bots.id = sqlc.arg(id)

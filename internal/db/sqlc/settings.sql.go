@@ -103,9 +103,21 @@ WITH updated AS (
       chat_model_id = COALESCE($5::uuid, bots.chat_model_id),
       memory_model_id = COALESCE($6::uuid, bots.memory_model_id),
       embedding_model_id = COALESCE($7::uuid, bots.embedding_model_id),
-      vlm_model_id = COALESCE($8::uuid, bots.vlm_model_id),
-      background_model_id = COALESCE($9::uuid, bots.background_model_id),
-      image_model_id = COALESCE($10::uuid, bots.image_model_id),
+      vlm_model_id = CASE
+          WHEN $8 IS NULL THEN bots.vlm_model_id
+          WHEN $8::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE $8::uuid
+      END,
+      background_model_id = CASE
+          WHEN $9 IS NULL THEN bots.background_model_id
+          WHEN $9::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE $9::uuid
+      END,
+      image_model_id = CASE
+          WHEN $10 IS NULL THEN bots.image_model_id
+          WHEN $10::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE $10::uuid
+      END,
       search_provider_id = COALESCE($11::uuid, bots.search_provider_id),
       updated_at = now()
   WHERE bots.id = $12

@@ -97,7 +97,10 @@ func (s *Service) UpsertBot(ctx context.Context, botID string, req UpsertRequest
 		}
 		embeddingModelUUID = modelID
 	}
-	vlmModelUUID := pgtype.UUID{}
+	// For optional model fields (VLM, Background, Image):
+	// - Non-empty value: resolve to UUID and update
+	// - Empty string: pass Valid=true zero UUID to trigger NULL in SQL (clear the field)
+	vlmModelUUID := pgtype.UUID{Valid: true}
 	if value := strings.TrimSpace(req.VlmModelID); value != "" {
 		modelID, err := s.resolveModelUUID(ctx, value)
 		if err != nil {
@@ -105,7 +108,7 @@ func (s *Service) UpsertBot(ctx context.Context, botID string, req UpsertRequest
 		}
 		vlmModelUUID = modelID
 	}
-	backgroundModelUUID := pgtype.UUID{}
+	backgroundModelUUID := pgtype.UUID{Valid: true}
 	if value := strings.TrimSpace(req.BackgroundModelID); value != "" {
 		modelID, err := s.resolveModelUUID(ctx, value)
 		if err != nil {
@@ -113,7 +116,7 @@ func (s *Service) UpsertBot(ctx context.Context, botID string, req UpsertRequest
 		}
 		backgroundModelUUID = modelID
 	}
-	imageModelUUID := pgtype.UUID{}
+	imageModelUUID := pgtype.UUID{Valid: true}
 	if value := strings.TrimSpace(req.ImageModelID); value != "" {
 		modelID, err := s.resolveModelUUID(ctx, value)
 		if err != nil {
