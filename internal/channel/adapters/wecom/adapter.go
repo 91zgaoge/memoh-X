@@ -538,7 +538,7 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			}
 
 			// Check command allowlist (admin bypass)
-			allowed, blocked, cmd := config.CanExecuteCommand(body.From.UserID, content)
+			_, blocked, cmd := config.CanExecuteCommand(body.From.UserID, content)
 			if blocked {
 				a.logger.Info("command blocked by allowlist",
 					slog.String("user_id", body.From.UserID),
