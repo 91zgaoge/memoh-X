@@ -168,10 +168,8 @@ cd /data2/memoh-v2 && bash backup.sh /data1/backup
 # 恢复代码
 tar xzf memoh-v2_code.tar.gz
 
-# 恢复数据库
-docker run --rm --volumes-from memoh-postgres \
-    -v $(pwd)/volumes:/backup alpine \
-    tar xzf /backup/postgres_data.tar.gz -C /var/lib/postgresql/data
+# 恢复数据库 (使用 SQL dump)
+docker exec -i memoh-postgres psql -U memoh < volumes/postgres_dump.sql
 ```
 
 ---
