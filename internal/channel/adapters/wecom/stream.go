@@ -953,20 +953,45 @@ func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, 
 	return wsClient.SendStream(ctx, sendReqID, body, cmd)
 }
 
-// sendStandaloneMessage 发送独立消息（使用 CmdSendMsg）
+// sendStandaloneMessage 发送独立消息
 // 用于分段发送的后续段落
+// 根据原始命令类型决定使用 CmdRespondMsg 还是 CmdSendMsg
 func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content string) error {
 	s.mu.Lock()
 	wsClient := s.wsClient
 	chatType := s.chatType
 	userID := s.userID
 	chatID := s.chatID
+	cmd := s.cmd
 	s.mu.Unlock()
 
 	if wsClient == nil {
 		return fmt.Errorf("websocket client is nil")
 	}
 
+	// 根据命令类型确定发送方式
+	if cmd == CmdRespondMsg {
+		// 被动回复模式：使用流式消息格式，但生成新的 streamID
+		// 因为相同 streamID 的消息会覆盖之前的内容
+		newStreamID := generateStreamID()
+		s.logger.Info("[MSG_ROUTE] sending subsequent segment with new streamID",
+			slog.String("new_stream_id", newStreamID),
+			slog.String("original_stream_id", s.streamID))
+
+		body := StreamMsgBody{
+			MsgType: MsgTypeStream,
+			Stream: StreamResponse{
+				ID:      newStreamID,
+				Finish:  false, // 后续段落不需要 finish，保持未完待续状态
+				Content: content,
+			},
+		}
+
+		// 使用原始 req_id（被动回复模式）
+		return wsClient.SendStream(ctx, s.reqID, body, CmdRespondMsg)
+	}
+
+	// 主动发送模式（CmdSendMsg）：使用独立 Markdown 消息
 	// 生成新的 req_id（CmdSendMsg 必须使用新的 req_id）
 	reqID := generateReqID(CmdSendMsg)
 
