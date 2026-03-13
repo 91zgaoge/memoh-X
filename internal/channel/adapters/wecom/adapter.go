@@ -50,6 +50,9 @@ type Adapter struct {
 	// WeCom限制：30条/分钟，1000条/小时
 	minuteLimiter *rate.Limiter // 30条/分钟
 	hourLimiter   *rate.Limiter // 1000条/小时
+
+	// Message deduplication manager
+	dedupManager *DedupManager
 }
 
 // NewWeComAdapter creates a new WeCom adapter (alias for NewAdapter for compatibility)
@@ -77,6 +80,8 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 		// burst设置为1，确保严格限速
 		minuteLimiter: rate.NewLimiter(rate.Every(2*time.Second), 1), // 30条/分钟 = 每2秒1条
 		hourLimiter:   rate.NewLimiter(rate.Every(3600*time.Second/1000), 1), // 1000条/小时
+		// 初始化消息去重管理器
+		dedupManager: NewDedupManager(),
 	}
 }
 
@@ -329,6 +334,17 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		streamID = generateStreamID()
 	}
 
+	// CRITICAL: Log the routing information for debugging message routing issues
+	a.logger.Info("[MSG_ROUTE] OpenStream creating outbound stream",
+		slog.String("req_id", reqID),
+		slog.String("stream_id", streamID),
+		slog.String("target", target),
+		slog.String("extracted_user_id", userID),
+		slog.String("extracted_chat_id", chatID),
+		slog.String("chat_type", chatType),
+		slog.Bool("is_mentioned", isMentioned),
+		slog.String("bot_id", cfg.BotID))
+
 	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, streamID, a.logger), nil
 }
 
@@ -351,8 +367,22 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 		}
 	}
 
+	// Determine command type based on req_id availability
+	// - If req_id is present: use CmdRespondMsg (reply to specific message)
+	// - If req_id is empty: use CmdSendMsg (proactive send) with new req_id
+	cmd := CmdRespondMsg
 	if reqID == "" {
-		return fmt.Errorf("req_id is required for WeCom responses")
+		reqID = generateReqID(CmdSendMsg)
+		cmd = CmdSendMsg
+		a.logger.Info("[MSG_ROUTE] Send (non-streaming) - no req_id, using proactive send",
+			slog.String("generated_req_id", reqID),
+			slog.String("target", msg.Target),
+			slog.String("bot_id", cfg.BotID))
+	} else {
+		a.logger.Info("[MSG_ROUTE] Send (non-streaming) - using respond",
+			slog.String("req_id", reqID),
+			slog.String("target", msg.Target),
+			slog.String("bot_id", cfg.BotID))
 	}
 
 	// Build response content
@@ -371,7 +401,7 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 		},
 	}
 
-	return wsClient.SendReply(ctx, reqID, body, CmdRespondMsg)
+	return wsClient.SendReply(ctx, reqID, body, cmd)
 }
 
 // handleWebSocketMessage handles incoming WebSocket messages
@@ -398,6 +428,15 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 		return fmt.Errorf("unmarshal message body: %w", err)
 	}
 
+	// Check for duplicate messages using req_id + msgid
+	if a.dedupManager.IsDuplicate(wsMsg.Headers.ReqID, body.MsgID) {
+		a.logger.Info("duplicate message detected, skipping",
+			slog.String("req_id", wsMsg.Headers.ReqID),
+			slog.String("msg_id", body.MsgID),
+			slog.String("from_user", body.From.UserID))
+		return nil
+	}
+
 	// Get WebSocket client for sending replies
 	wsClient := a.getWebSocketClient(cfg.BotID)
 
@@ -420,17 +459,6 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 		contentPreview = "[图文混排]"
 	}
 
-	a.logger.Info("message received",
-		slog.String("msg_id", body.MsgID),
-		slog.String("msg_type", body.MsgType),
-		slog.String("from", body.From.UserID),
-		slog.String("chat_type", body.ChatType),
-		slog.String("chat_id", body.ChatID),
-		slog.String("req_id", wsMsg.Headers.ReqID),
-		slog.String("content_preview", truncateString(contentPreview, 100)),
-		slog.Bool("group_chat_enabled", config.GroupChatEnabled),
-		slog.Bool("require_mention", config.RequireMention))
-
 	// Determine reply target based on chat type
 	replyTarget := ""
 	if body.ChatType == "group" {
@@ -438,6 +466,18 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 	} else {
 		replyTarget = "user_id:" + body.From.UserID
 	}
+
+	a.logger.Info("[MSG_ROUTE] message received",
+		slog.String("msg_id", body.MsgID),
+		slog.String("msg_type", body.MsgType),
+		slog.String("from_user_id", body.From.UserID),
+		slog.String("chat_type", body.ChatType),
+		slog.String("chat_id", body.ChatID),
+		slog.String("req_id", wsMsg.Headers.ReqID),
+		slog.String("reply_target", replyTarget),
+		slog.String("content_preview", truncateString(contentPreview, 100)),
+		slog.Bool("group_chat_enabled", config.GroupChatEnabled),
+		slog.Bool("require_mention", config.RequireMention))
 
 	// Convert to internal message
 	msg := channel.InboundMessage{
@@ -497,6 +537,30 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 				content = config.ExtractGroupMessageContent(content)
 			}
 
+			// Check command allowlist (admin bypass)
+			allowed, blocked, cmd := config.CanExecuteCommand(body.From.UserID, content)
+			if blocked {
+				a.logger.Info("command blocked by allowlist",
+					slog.String("user_id", body.From.UserID),
+					slog.String("command", cmd),
+					slog.Bool("is_admin", config.IsAdmin(body.From.UserID)))
+				// Send block message to user
+				if wsClient != nil {
+					blockBody := StreamMsgBody{
+						MsgType: MsgTypeStream,
+						Stream: StreamResponse{
+							ID:      generateStreamID(),
+							Finish:  true,
+							Content: BuildBlockMessage(cmd),
+						},
+					}
+					if err := wsClient.SendReply(ctx, wsMsg.Headers.ReqID, blockBody, CmdRespondMsg); err != nil {
+						a.logger.Warn("failed to send command block message", slog.Any("error", err))
+					}
+				}
+				return nil
+			}
+
 			// Check for new chat command
 			if isNewChatCommand(content) {
 				return a.handleNewChatCommand(ctx, cfg, wsMsg, body)
@@ -518,14 +582,26 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 				a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
 				// Store streamID in message metadata so CreateOutboundStream can use it
 				msg.Metadata["stream_id"] = streamID
-				a.logger.Info("calling handler for text message", slog.String("req_id", wsMsg.Headers.ReqID), slog.String("content", content), slog.String("stream_id", streamID))
+				a.logger.Info("[MSG_ROUTE] calling handler for text message",
+					slog.String("req_id", wsMsg.Headers.ReqID),
+					slog.String("stream_id", streamID),
+					slog.String("from_user_id", body.From.UserID),
+					slog.String("reply_target", msg.ReplyTarget),
+					slog.String("content_preview", truncateString(content, 100)))
 				err := handler(ctx, cfg, msg)
 				if err != nil {
-					a.logger.Error("handler returned error", slog.String("req_id", wsMsg.Headers.ReqID), slog.Any("error", err))
+					a.logger.Error("[MSG_ROUTE] handler returned error",
+						slog.String("req_id", wsMsg.Headers.ReqID),
+						slog.String("from_user_id", body.From.UserID),
+						slog.String("reply_target", msg.ReplyTarget),
+						slog.Any("error", err))
 					// CRITICAL: Send error reply to cover "thinking..." message
 					a.sendErrorReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID, "处理出错，请重试")
 				} else {
-					a.logger.Info("handler completed successfully", slog.String("req_id", wsMsg.Headers.ReqID))
+					a.logger.Info("[MSG_ROUTE] handler completed successfully",
+						slog.String("req_id", wsMsg.Headers.ReqID),
+						slog.String("from_user_id", body.From.UserID),
+						slog.String("reply_target", msg.ReplyTarget))
 				}
 				return err
 			}

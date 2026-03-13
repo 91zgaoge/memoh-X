@@ -45,6 +45,10 @@ type OutboundStream struct {
 
 	// Message rate limiting: track send timestamps in a sliding window (1 minute)
 	sendTimes []time.Time
+
+	// Reasoning phase throttling
+	lastThinkingSendTime time.Time     // 上次思考阶段发送时间
+	thinkingSendInterval time.Duration // 思考阶段发送间隔
 }
 
 // StreamTimeout 流式消息超时时间（6分钟）
@@ -61,6 +65,9 @@ const MinSendInterval = 3 * time.Second // 3秒，20条/分钟，严格遵守 We
 // MaxMessagesPerMinute 每分钟最大消息数（WeCom 限制 30，使用 20 留有余量）
 const MaxMessagesPerMinute = 20
 
+// ReasoningSendInterval 思考阶段流式更新最小间隔（防止 SDK 队列溢出）
+const ReasoningSendInterval = 800 * time.Millisecond
+
 // NewOutboundStream creates a new outbound stream
 func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger) *OutboundStream {
 	// If no streamID provided, generate a new one
@@ -69,20 +76,31 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 	}
 
 	s := &OutboundStream{
-		adapter:         adapter,
-		cfg:             cfg,
-		wsClient:        wsClient,
-		reqID:           reqID,
-		chatID:          chatID,
-		userID:          userID,
-		chatType:        chatType,
-		isMentioned:     isMentioned,
-		streamID:        streamID,
-		logger:          logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID)),
-		streamStartTime: time.Now(),
-		stopTicker:      make(chan struct{}),
-		lastSendTime:    time.Now(),
+		adapter:              adapter,
+		cfg:                  cfg,
+		wsClient:             wsClient,
+		reqID:                reqID,
+		chatID:               chatID,
+		userID:               userID,
+		chatType:             chatType,
+		isMentioned:          isMentioned,
+		streamID:             streamID,
+		logger:               logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID), slog.String("user_id", userID), slog.String("chat_id", chatID), slog.String("chat_type", chatType)),
+		streamStartTime:      time.Now(),
+		stopTicker:           make(chan struct{}),
+		lastSendTime:         time.Now(),
+		thinkingSendInterval: ReasoningSendInterval,
 	}
+
+	// CRITICAL: Log the target user for message routing verification
+	logger.Info("[MSG_ROUTE] OutboundStream created",
+		slog.String("req_id", reqID),
+		slog.String("stream_id", streamID),
+		slog.String("target_user_id", userID),
+		slog.String("target_chat_id", chatID),
+		slog.String("chat_type", chatType),
+		slog.Bool("is_mentioned", isMentioned),
+		slog.String("bot_id", cfg.BotID))
 
 	// Start background ticker for buffered sending
 	s.ticker = time.NewTicker(MinSendInterval)
@@ -121,8 +139,15 @@ func (s *OutboundStream) flushBuffer() {
 		return
 	}
 
+	// Check if content contains think tags (reasoning phase)
+	// Apply shorter throttle interval during thinking phase to prevent SDK queue overflow
+	minInterval := MinSendInterval
+	if ContainsThinkTags(content) {
+		minInterval = s.thinkingSendInterval
+	}
+
 	// Check if enough time has passed since last send
-	if time.Since(s.lastSendTime) < MinSendInterval {
+	if time.Since(s.lastSendTime) < minInterval {
 		return
 	}
 
@@ -442,6 +467,16 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 		slog.Bool("was_truncated", wasTruncated),
 		slog.Bool("finish", finish))
 
+	// CRITICAL: Verify target user information before sending
+	// This helps diagnose message routing issues
+	targetUserID := s.userID
+	targetChatID := s.chatID
+	if targetUserID == "" && targetChatID == "" {
+		s.logger.Error("[MSG_ROUTE_ERROR] Both userID and chatID are empty, cannot determine message target",
+			slog.String("stream_id", streamID),
+			slog.String("req_id", reqID))
+	}
+
 	// Send stream update using WeCom stream format
 	body := StreamMsgBody{
 		MsgType: MsgTypeStream,
@@ -467,10 +502,18 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 		// WeCom SDK requires new req_id for proactive messages (aibot_send_msg)
 		// Using original req_id will cause ACK timeout because WeCom won't recognize it
 		sendReqID = generateReqID(CmdSendMsg)
-		s.logger.Debug("using proactive send for group message without mention",
+		s.logger.Info("[MSG_ROUTE] Using proactive send (CmdSendMsg) for group message without mention",
 			slog.String("chat_type", chatType),
 			slog.Bool("is_mentioned", isMentioned),
+			slog.String("target_chat_id", targetChatID),
 			slog.String("original_req_id", reqID),
+			slog.String("send_req_id", sendReqID))
+	} else {
+		s.logger.Info("[MSG_ROUTE] Using respond mode (CmdRespondMsg)",
+			slog.String("chat_type", chatType),
+			slog.Bool("is_mentioned", isMentioned),
+			slog.String("target_user_id", targetUserID),
+			slog.String("target_chat_id", targetChatID),
 			slog.String("send_req_id", sendReqID))
 	}
 
@@ -517,15 +560,19 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 
 		if finish {
 			s.sent.Store(true)
-			s.logger.Info("final stream response sent successfully",
+			s.logger.Info("[MSG_ROUTE] Final stream response sent successfully",
 				slog.String("stream_id", streamID),
 				slog.String("cmd", cmd),
+				slog.String("send_req_id", sendReqID),
+				slog.String("target_user_id", s.userID),
+				slog.String("target_chat_id", s.chatID),
 				slog.Int("content_bytes", len(truncatedContent)),
 				slog.Bool("was_truncated", wasTruncated),
 				slog.Int("attempts", attempt+1))
 		} else {
 			s.logger.Debug("intermediate stream update sent",
 				slog.String("stream_id", streamID),
+				slog.String("send_req_id", sendReqID),
 				slog.Int("content_bytes", len(truncatedContent)))
 		}
 		return nil
@@ -761,10 +808,13 @@ func (s *OutboundStream) sendSegmentedContent(ctx context.Context, content strin
 	maxSegmentBytes := MaxContentBytes - 200
 	segments := splitContent(content, maxSegmentBytes)
 
-	s.logger.Info("sending segmented content",
+	s.logger.Info("[MSG_ROUTE] sending segmented content",
 		slog.Int("total_bytes", len([]byte(content))),
 		slog.Int("segments", len(segments)),
-		slog.Int("max_segment_bytes", maxSegmentBytes))
+		slog.Int("max_segment_bytes", maxSegmentBytes),
+		slog.String("target_user_id", s.userID),
+		slog.String("target_chat_id", s.chatID),
+		slog.String("chat_type", s.chatType))
 
 	// 第1段：使用流式消息发送
 	// CRITICAL: 如果只有一段，使用 finish=true 结束流式消息
@@ -853,11 +903,22 @@ func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, 
 	reqID := s.reqID
 	chatType := s.chatType
 	isMentioned := s.isMentioned
+	userID := s.userID
+	chatID := s.chatID
 	s.mu.Unlock()
 
 	if wsClient == nil {
 		return fmt.Errorf("websocket client is nil")
 	}
+
+	// CRITICAL: Log target user info for routing verification
+	s.logger.Info("[MSG_ROUTE] sendStreamContent",
+		slog.String("stream_id", streamID),
+		slog.String("original_req_id", reqID),
+		slog.String("chat_type", chatType),
+		slog.String("target_user_id", userID),
+		slog.String("target_chat_id", chatID),
+		slog.Bool("finish", finish))
 
 	// 构建流式消息体
 	body := StreamMsgBody{
@@ -875,6 +936,9 @@ func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, 
 	if chatType == "group" && !isMentioned {
 		cmd = CmdSendMsg
 		sendReqID = generateReqID(CmdSendMsg)
+		s.logger.Info("[MSG_ROUTE] sendStreamContent using CmdSendMsg (proactive)",
+			slog.String("send_req_id", sendReqID),
+			slog.String("target_chat_id", chatID))
 	}
 
 	return wsClient.SendStream(ctx, sendReqID, body, cmd)
@@ -886,6 +950,8 @@ func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content stri
 	s.mu.Lock()
 	wsClient := s.wsClient
 	chatType := s.chatType
+	userID := s.userID
+	chatID := s.chatID
 	s.mu.Unlock()
 
 	if wsClient == nil {
@@ -912,9 +978,12 @@ func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content stri
 		ChatType: chatTypeInt,
 	}
 
-	s.logger.Debug("sending standalone message",
+	s.logger.Info("[MSG_ROUTE] sending standalone message",
 		slog.String("req_id", reqID),
-		slog.Int("chat_type", chatTypeInt),
+		slog.String("chat_type", chatType),
+		slog.Int("chat_type_int", chatTypeInt),
+		slog.String("target_user_id", userID),
+		slog.String("target_chat_id", chatID),
 		slog.Int("content_bytes", len([]byte(content))))
 
 	return wsClient.SendReply(ctx, reqID, body, CmdSendMsg)

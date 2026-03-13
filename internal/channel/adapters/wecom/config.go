@@ -12,6 +12,12 @@ type WebSocketConfig struct {
 	WebsocketURL string `json:"websocket_url,omitempty"`
 }
 
+// CommandConfig 命令白名单配置
+type CommandConfig struct {
+	Enabled   bool     `json:"enabled"`
+	Allowlist []string `json:"allowlist"`
+}
+
 // Config holds the WeCom channel configuration
 type Config struct {
 	// WebSocket settings (primary mode)
@@ -25,6 +31,12 @@ type Config struct {
 
 	// Admin users who bypass restrictions
 	AdminUsers []string `json:"admin_users"`
+
+	// Command allowlist settings
+	Commands CommandConfig `json:"commands"`
+
+	// Welcome message for enter_chat event
+	WelcomeMessage string `json:"welcome_message"`
 }
 
 // DefaultConfig returns a default configuration
@@ -34,6 +46,10 @@ func DefaultConfig() *Config {
 		GroupChatEnabled: true,
 		RequireMention:   true,
 		AdminUsers:       []string{},
+		Commands: CommandConfig{
+			Enabled:   false, // 默认不启用命令白名单限制
+			Allowlist: DefaultCommandAllowlist,
+		},
 	}
 }
 
@@ -67,6 +83,35 @@ func (c *Config) IsAdmin(userID string) bool {
 		}
 	}
 	return false
+}
+
+// CanExecuteCommand checks if a user can execute a command
+// Admins bypass the allowlist check
+func (c *Config) CanExecuteCommand(userID string, message string) (allowed bool, blocked bool, command string) {
+	// Check if it's a command
+	cmd := ExtractLeadingSlashCommand(message)
+	if cmd == "" {
+		// Not a command, always allowed
+		return true, false, ""
+	}
+
+	// Admin bypass - admins can execute any command
+	if c.IsAdmin(userID) {
+		return true, false, cmd
+	}
+
+	// If command allowlist is not enabled, allow all commands
+	if !c.Commands.Enabled {
+		return true, false, cmd
+	}
+
+	// Check command allowlist
+	result := CheckCommandAllowlist(message, c.Commands.Allowlist)
+	if result.IsCommand && !result.Allowed {
+		return false, true, cmd
+	}
+
+	return true, false, cmd
 }
 
 // ShouldTriggerGroupResponse checks if a group message should trigger a response
@@ -141,6 +186,9 @@ func (c *Config) ExtractGroupMessageContent(content string) string {
 
 // GetWelcomeMessage returns the welcome message for enter_chat event
 func (c *Config) GetWelcomeMessage() string {
+	if c.WelcomeMessage != "" {
+		return c.WelcomeMessage
+	}
 	return "您好！我是智能助手，有什么可以帮您的吗？"
 }
 
@@ -170,6 +218,26 @@ func ParseConfig(raw map[string]any) (*Config, error) {
 				cfg.AdminUsers = append(cfg.AdminUsers, s)
 			}
 		}
+	}
+
+	// Parse command allowlist settings
+	if commands, ok := raw["commands"].(map[string]any); ok {
+		if enabled, ok := commands["enabled"].(bool); ok {
+			cfg.Commands.Enabled = enabled
+		}
+		if allowlist, ok := commands["allowlist"].([]any); ok {
+			cfg.Commands.Allowlist = make([]string, 0, len(allowlist))
+			for _, item := range allowlist {
+				if s, ok := item.(string); ok {
+					cfg.Commands.Allowlist = append(cfg.Commands.Allowlist, s)
+				}
+			}
+		}
+	}
+
+	// Parse welcome message
+	if welcomeMsg, ok := raw["welcome_message"].(string); ok {
+		cfg.WelcomeMessage = welcomeMsg
 	}
 
 	if err := cfg.Validate(); err != nil {
