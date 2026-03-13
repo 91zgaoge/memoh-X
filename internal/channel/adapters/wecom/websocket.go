@@ -148,11 +148,16 @@ func (c *WebSocketClient) Start(ctx context.Context) error {
 
 // Stop closes the WebSocket connection
 func (c *WebSocketClient) Stop() {
-	c.isManualClose = true
-	close(c.stopCh)
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Prevent double close
+	if c.isManualClose {
+		return
+	}
+
+	c.isManualClose = true
+	close(c.stopCh)
 
 	c.clearPendingMessages("Connection manually closed")
 
@@ -297,7 +302,9 @@ func (c *WebSocketClient) run(ctx context.Context) {
 	// Start message reader in a separate goroutine
 	// This is critical because readMessage blocks and would block the select if in default case
 	messageCh := make(chan error, 1)
-	go c.messageReader(ctx, messageCh)
+	readerCtx, cancelReader := context.WithCancel(ctx)
+	defer cancelReader()
+	go c.messageReader(readerCtx, messageCh)
 
 	for {
 		select {
@@ -311,11 +318,14 @@ func (c *WebSocketClient) run(ctx context.Context) {
 
 		case <-c.reconnectCh:
 			c.logger.Info("reconnect signal received")
+			// Cancel old reader before reconnect
+			cancelReader()
 			if err := c.reconnect(ctx); err != nil {
 				c.logger.Error("reconnect failed", slog.Any("error", err))
 			}
-			// Restart message reader after reconnect
-			go c.messageReader(ctx, messageCh)
+			// Create new reader context and restart message reader after reconnect
+			readerCtx, cancelReader = context.WithCancel(ctx)
+			go c.messageReader(readerCtx, messageCh)
 
 		case <-heartbeatTicker.C:
 			if err := c.sendHeartbeat(); err != nil {
@@ -326,9 +336,12 @@ func (c *WebSocketClient) run(ctx context.Context) {
 		case err := <-messageCh:
 			if err != nil {
 				c.logger.Error("read message error", slog.Any("error", err))
+				// Cancel old reader before triggering reconnect
+				cancelReader()
 				go c.triggerReconnect()
-				// Restart message reader after error
-				go c.messageReader(ctx, messageCh)
+				// Create new reader context and restart message reader after error
+				readerCtx, cancelReader = context.WithCancel(ctx)
+				go c.messageReader(readerCtx, messageCh)
 			}
 		}
 	}
