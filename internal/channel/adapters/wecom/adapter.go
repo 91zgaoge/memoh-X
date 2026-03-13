@@ -310,8 +310,17 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		}
 	}
 
+	// Determine command type based on req_id availability
+	// - If req_id is present: use CmdRespondMsg (reply to specific message)
+	// - If req_id is empty: use CmdSendMsg (proactive send) with new req_id
+	cmd := CmdRespondMsg
 	if reqID == "" {
-		return nil, fmt.Errorf("req_id is required for WeCom responses")
+		reqID = generateReqID(CmdSendMsg)
+		cmd = CmdSendMsg
+		a.logger.Info("[MSG_ROUTE] OpenStream - no req_id, using proactive send",
+			slog.String("generated_req_id", reqID),
+			slog.String("target", target),
+			slog.String("bot_id", cfg.BotID))
 	}
 
 	// Parse target for chat info
@@ -345,7 +354,7 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		slog.Bool("is_mentioned", isMentioned),
 		slog.String("bot_id", cfg.BotID))
 
-	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, streamID, a.logger), nil
+	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, streamID, a.logger, cmd), nil
 }
 
 // Send sends a message directly (non-streaming)

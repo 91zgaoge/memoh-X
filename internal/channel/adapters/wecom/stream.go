@@ -24,6 +24,7 @@ type OutboundStream struct {
 	userID          string
 	chatType        string // 会话类型：single 或 group
 	isMentioned     bool   // 是否被@提及（群聊时有效）
+	cmd             string // 命令类型：CmdRespondMsg 或 CmdSendMsg
 	logger          *slog.Logger
 
 	buffer          strings.Builder
@@ -69,10 +70,16 @@ const MaxMessagesPerMinute = 20
 const ReasoningSendInterval = 800 * time.Millisecond
 
 // NewOutboundStream creates a new outbound stream
-func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger) *OutboundStream {
+func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger, cmd ...string) *OutboundStream {
 	// If no streamID provided, generate a new one
 	if streamID == "" {
 		streamID = generateStreamID()
+	}
+
+	// Determine command type
+	cmdType := CmdRespondMsg
+	if len(cmd) > 0 && cmd[0] != "" {
+		cmdType = cmd[0]
 	}
 
 	s := &OutboundStream{
@@ -84,6 +91,7 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		userID:               userID,
 		chatType:             chatType,
 		isMentioned:          isMentioned,
+		cmd:                  cmdType,
 		streamID:             streamID,
 		logger:               logger.With(slog.String("component", "wecom_stream"), slog.String("req_id", reqID), slog.String("user_id", userID), slog.String("chat_id", chatID), slog.String("chat_type", chatType)),
 		streamStartTime:      time.Now(),
@@ -903,7 +911,6 @@ func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, 
 	streamID := s.streamID
 	reqID := s.reqID
 	chatType := s.chatType
-	isMentioned := s.isMentioned
 	userID := s.userID
 	chatID := s.chatID
 	s.mu.Unlock()
@@ -919,6 +926,7 @@ func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, 
 		slog.String("chat_type", chatType),
 		slog.String("target_user_id", userID),
 		slog.String("target_chat_id", chatID),
+		slog.String("cmd", s.cmd),
 		slog.Bool("finish", finish))
 
 	// 构建流式消息体
@@ -931,11 +939,11 @@ func (s *OutboundStream) sendStreamContent(ctx context.Context, content string, 
 		},
 	}
 
-	// 确定命令类型
-	cmd := CmdRespondMsg
+	// 使用预存储的命令类型
+	cmd := s.cmd
 	sendReqID := reqID
-	if chatType == "group" && !isMentioned {
-		cmd = CmdSendMsg
+	if cmd == CmdSendMsg {
+		// 主动发送需要生成新的 req_id
 		sendReqID = generateReqID(CmdSendMsg)
 		s.logger.Info("[MSG_ROUTE] sendStreamContent using CmdSendMsg (proactive)",
 			slog.String("send_req_id", sendReqID),
