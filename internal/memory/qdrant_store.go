@@ -620,7 +620,7 @@ func (s *QdrantStore) refreshCollectionSchema(ctx context.Context, vectors map[s
 		if len(missing) > 0 {
 			// Qdrant does not support adding new named vectors to an existing
 			// collection. Only recreate if the collection is empty; otherwise
-			// refuse to avoid silent data loss.
+			// log warning and continue with existing vectors to avoid blocking startup.
 			names := make([]string, 0, len(missing))
 			for n := range missing {
 				names = append(names, n)
@@ -630,11 +630,14 @@ func (s *QdrantStore) refreshCollectionSchema(ctx context.Context, vectors map[s
 				Exact:          qdrant.PtrOf(true),
 			})
 			if countErr == nil && pointCount > 0 {
-				return fmt.Errorf(
-					"qdrant: collection %q has %d points but is missing named vectors %v; "+
-						"refusing to recreate to avoid data loss — please migrate or reset manually",
-					s.collection, pointCount, names,
+				slog.Warn("qdrant: collection has data but missing named vectors; continuing with existing vectors. "+
+					"New embedding models will not be available until collection is migrated or reset.",
+					slog.String("collection", s.collection),
+					slog.Uint64("points", pointCount),
+					slog.Any("missing_vectors", names),
 				)
+				// Continue with existing vectors instead of failing
+				return s.ensurePayloadIndexes(ctx)
 			}
 			slog.Warn("qdrant: empty collection missing named vectors, recreating",
 				slog.String("collection", s.collection),
