@@ -23,33 +23,49 @@ LEFT JOIN search_providers ON search_providers.id = bots.search_provider_id
 WHERE bots.id = $1;
 
 -- name: UpsertBotSettings :one
-WITH updated AS (
+WITH params AS (
+  SELECT
+    sqlc.arg(id)::uuid as bot_id,
+    sqlc.arg(max_context_load_time)::int as max_context_load_time,
+    sqlc.arg(language)::text as language,
+    sqlc.arg(allow_guest)::bool as allow_guest,
+    sqlc.arg(group_require_mention)::bool as group_require_mention,
+    sqlc.narg(chat_model_id)::uuid as chat_model_id,
+    sqlc.narg(memory_model_id)::uuid as memory_model_id,
+    sqlc.narg(embedding_model_id)::uuid as embedding_model_id,
+    sqlc.narg(vlm_model_id)::uuid as vlm_model_id,
+    sqlc.narg(background_model_id)::uuid as background_model_id,
+    sqlc.narg(image_model_id)::uuid as image_model_id,
+    sqlc.narg(search_provider_id)::uuid as search_provider_id
+),
+updated AS (
   UPDATE bots
-  SET max_context_load_time = sqlc.arg(max_context_load_time),
-      language = sqlc.arg(language),
-      allow_guest = sqlc.arg(allow_guest),
-      group_require_mention = sqlc.arg(group_require_mention),
-      chat_model_id = COALESCE(sqlc.narg(chat_model_id)::uuid, bots.chat_model_id),
-      memory_model_id = COALESCE(sqlc.narg(memory_model_id)::uuid, bots.memory_model_id),
-      embedding_model_id = COALESCE(sqlc.narg(embedding_model_id)::uuid, bots.embedding_model_id),
+  SET max_context_load_time = params.max_context_load_time,
+      language = params.language,
+      allow_guest = params.allow_guest,
+      group_require_mention = params.group_require_mention,
+      chat_model_id = COALESCE(params.chat_model_id, bots.chat_model_id),
+      memory_model_id = COALESCE(params.memory_model_id, bots.memory_model_id),
+      embedding_model_id = COALESCE(params.embedding_model_id, bots.embedding_model_id),
       vlm_model_id = CASE
-          WHEN sqlc.narg(vlm_model_id) IS NULL THEN bots.vlm_model_id
-          WHEN sqlc.narg(vlm_model_id)::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
-          ELSE sqlc.narg(vlm_model_id)::uuid
+          WHEN params.vlm_model_id IS NULL THEN bots.vlm_model_id
+          WHEN params.vlm_model_id = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE params.vlm_model_id
       END,
       background_model_id = CASE
-          WHEN sqlc.narg(background_model_id) IS NULL THEN bots.background_model_id
-          WHEN sqlc.narg(background_model_id)::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
-          ELSE sqlc.narg(background_model_id)::uuid
+          WHEN params.background_model_id IS NULL THEN bots.background_model_id
+          WHEN params.background_model_id = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE params.background_model_id
       END,
       image_model_id = CASE
-          WHEN sqlc.narg(image_model_id) IS NULL THEN bots.image_model_id
-          WHEN sqlc.narg(image_model_id)::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
-          ELSE sqlc.narg(image_model_id)::uuid
+          WHEN params.image_model_id IS NULL THEN bots.image_model_id
+          WHEN params.image_model_id = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE params.image_model_id
       END,
-      search_provider_id = COALESCE(sqlc.narg(search_provider_id)::uuid, bots.search_provider_id),
+      search_provider_id = COALESCE(params.search_provider_id, bots.search_provider_id),
       updated_at = now()
-  WHERE bots.id = sqlc.arg(id)
+  FROM params
+  WHERE bots.id = params.bot_id
   RETURNING bots.id, bots.max_context_load_time, bots.language, bots.allow_guest, bots.group_require_mention, bots.chat_model_id, bots.memory_model_id, bots.embedding_model_id, bots.vlm_model_id, bots.background_model_id, bots.image_model_id, bots.search_provider_id
 )
 SELECT

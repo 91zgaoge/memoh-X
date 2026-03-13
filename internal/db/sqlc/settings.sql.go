@@ -94,33 +94,49 @@ func (q *Queries) GetSettingsByBotID(ctx context.Context, id pgtype.UUID) (GetSe
 }
 
 const upsertBotSettings = `-- name: UpsertBotSettings :one
-WITH updated AS (
+WITH params AS (
+  SELECT
+    $1::uuid as bot_id,
+    $2::int as max_context_load_time,
+    $3::text as language,
+    $4::bool as allow_guest,
+    $5::bool as group_require_mention,
+    $6::uuid as chat_model_id,
+    $7::uuid as memory_model_id,
+    $8::uuid as embedding_model_id,
+    $9::uuid as vlm_model_id,
+    $10::uuid as background_model_id,
+    $11::uuid as image_model_id,
+    $12::uuid as search_provider_id
+),
+updated AS (
   UPDATE bots
-  SET max_context_load_time = $1,
-      language = $2,
-      allow_guest = $3,
-      group_require_mention = $4,
-      chat_model_id = COALESCE($5::uuid, bots.chat_model_id),
-      memory_model_id = COALESCE($6::uuid, bots.memory_model_id),
-      embedding_model_id = COALESCE($7::uuid, bots.embedding_model_id),
+  SET max_context_load_time = params.max_context_load_time,
+      language = params.language,
+      allow_guest = params.allow_guest,
+      group_require_mention = params.group_require_mention,
+      chat_model_id = COALESCE(params.chat_model_id, bots.chat_model_id),
+      memory_model_id = COALESCE(params.memory_model_id, bots.memory_model_id),
+      embedding_model_id = COALESCE(params.embedding_model_id, bots.embedding_model_id),
       vlm_model_id = CASE
-          WHEN $8 IS NULL THEN bots.vlm_model_id
-          WHEN $8::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
-          ELSE $8::uuid
+          WHEN params.vlm_model_id IS NULL THEN bots.vlm_model_id
+          WHEN params.vlm_model_id = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE params.vlm_model_id
       END,
       background_model_id = CASE
-          WHEN $9 IS NULL THEN bots.background_model_id
-          WHEN $9::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
-          ELSE $9::uuid
+          WHEN params.background_model_id IS NULL THEN bots.background_model_id
+          WHEN params.background_model_id = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE params.background_model_id
       END,
       image_model_id = CASE
-          WHEN $10 IS NULL THEN bots.image_model_id
-          WHEN $10::uuid = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
-          ELSE $10::uuid
+          WHEN params.image_model_id IS NULL THEN bots.image_model_id
+          WHEN params.image_model_id = '00000000-0000-0000-0000-000000000000'::uuid THEN NULL
+          ELSE params.image_model_id
       END,
-      search_provider_id = COALESCE($11::uuid, bots.search_provider_id),
+      search_provider_id = COALESCE(params.search_provider_id, bots.search_provider_id),
       updated_at = now()
-  WHERE bots.id = $12
+  FROM params
+  WHERE bots.id = params.bot_id
   RETURNING bots.id, bots.max_context_load_time, bots.language, bots.allow_guest, bots.group_require_mention, bots.chat_model_id, bots.memory_model_id, bots.embedding_model_id, bots.vlm_model_id, bots.background_model_id, bots.image_model_id, bots.search_provider_id
 )
 SELECT
@@ -178,6 +194,7 @@ type UpsertBotSettingsRow struct {
 
 func (q *Queries) UpsertBotSettings(ctx context.Context, arg UpsertBotSettingsParams) (UpsertBotSettingsRow, error) {
 	row := q.db.QueryRow(ctx, upsertBotSettings,
+		arg.ID,
 		arg.MaxContextLoadTime,
 		arg.Language,
 		arg.AllowGuest,
@@ -189,7 +206,6 @@ func (q *Queries) UpsertBotSettings(ctx context.Context, arg UpsertBotSettingsPa
 		arg.BackgroundModelID,
 		arg.ImageModelID,
 		arg.SearchProviderID,
-		arg.ID,
 	)
 	var i UpsertBotSettingsRow
 	err := row.Scan(
