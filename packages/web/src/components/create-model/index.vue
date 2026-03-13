@@ -338,7 +338,7 @@ const catalogModels = computed<CatalogModel[]>(() => {
   const ct = (curProvider.value as any)?.client_type
   return ct ? getProviderModels(ct) : []
 })
-const selectedCatalogId = ref<string>('')
+const selectedCatalogId = ref<string>('__custom__')
 
 function onCatalogSelect(modelId: string) {
   selectedCatalogId.value = modelId
@@ -500,11 +500,11 @@ watch(open, async () => {
     const max_tokens = (editInfo.value as any).max_tokens ?? 0
     form.resetForm({ values: { type, model_id, name, dimensions, is_multimodal, context_window, fallback_model_id, reasoning, max_tokens } })
     userEditedName.value = !!(name && name !== model_id)
-    selectedCatalogId.value = ''
+    selectedCatalogId.value = '__custom__'
   } else {
     form.resetForm({ values: { ...emptyValues } })
     userEditedName.value = false
-    selectedCatalogId.value = ''
+    selectedCatalogId.value = '__custom__'
   }
 }, {
   immediate: true,
