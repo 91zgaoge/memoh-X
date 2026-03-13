@@ -47,7 +47,7 @@ ENV TZ=${TZ}
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata wget nerdctl cni-plugins iptables \
+RUN apk add --no-cache ca-certificates tzdata wget nerdctl cni-plugins iptables python3 py3-pip \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
     && echo "${TZ}" > /etc/timezone \
     && mkdir -p /opt/cni/bin \

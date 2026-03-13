@@ -96,6 +96,7 @@ services:
       - containerd_data:/var/lib/containerd
       - server_cni_state:/var/lib/cni
       - memoh_data:/opt/memoh/data
+      - /data2/zimage-ncnn:/zimage:ro
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN

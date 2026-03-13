@@ -1,6 +1,6 @@
 import { AgentAuthContext, IdentityContext } from '../types'
 
-export const buildIdentityHeaders = (identity: IdentityContext, auth: AgentAuthContext) => {
+export const buildIdentityHeaders = (identity: IdentityContext, auth: AgentAuthContext, reqId?: string) => {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${auth.bearer}`,
   }
@@ -15,6 +15,9 @@ export const buildIdentityHeaders = (identity: IdentityContext, auth: AgentAuthC
   }
   if (identity.replyTarget) {
     headers['X-Memoh-Reply-Target'] = identity.replyTarget
+  }
+  if (reqId) {
+    headers['X-Memoh-Req-ID'] = reqId
   }
   return headers
 }

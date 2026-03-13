@@ -16,6 +16,7 @@ type ToolSessionContext struct {
 	SessionToken      string
 	CurrentPlatform   string
 	ReplyTarget       string
+	ReqID             string // Original message req_id for passive reply mode
 	IncludeTools      []string // extended tools to include in tools/list
 }
 

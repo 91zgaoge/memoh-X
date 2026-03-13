@@ -21,6 +21,7 @@ const (
 	headerCurrentPlatform   = "X-Memoh-Current-Platform"
 	headerReplyTarget       = "X-Memoh-Reply-Target"
 	headerIncludeTools      = "X-Memoh-Include-Tools"
+	headerReqID             = "X-Memoh-Req-ID"
 )
 
 func (h *ContainerdHandler) SetToolGatewayService(service *mcpgw.ToolGatewayService) {
@@ -262,6 +263,7 @@ func (h *ContainerdHandler) buildToolSessionContext(c echo.Context, botID string
 		SessionToken:      strings.TrimSpace(c.Request().Header.Get(headerSessionToken)),
 		CurrentPlatform:   strings.TrimSpace(c.Request().Header.Get(headerCurrentPlatform)),
 		ReplyTarget:       strings.TrimSpace(c.Request().Header.Get(headerReplyTarget)),
+		ReqID:             strings.TrimSpace(c.Request().Header.Get(headerReqID)),
 		IncludeTools:      includeTools,
 	}
 }

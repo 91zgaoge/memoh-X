@@ -23,11 +23,16 @@ outgoing:
   # 连接池设置
   pool_connections: 100
   pool_maxsize: 100
+  # 使用常见浏览器的 User-Agent，减少被识别为爬虫的概率
+  useragent_suffix: ""
+  # 代理配置
   proxies:
     http:
       - http://ccd:88152353@10.71.252.4:10810
     https:
       - http://ccd:88152353@10.71.252.4:10810
+  # 启用 HTTP/2 支持（如果可用）
+  enable_http2: true
 
 ui:
   static_use_hash: true
@@ -46,9 +51,13 @@ engines:
   - name: bing
     engine: bing
     shortcut: b
-    timeout: 10.0
+    timeout: 15.0
     disabled: false
     base_url: https://www.bing.com
+    # 允许跟随重定向，避免 "1 redirects, maximum: 0" 警告
+    follow_redirects: true
+    # 降低请求频率，减少被拦截概率
+    interval: 2.0
 
   - name: brave
     engine: brave
@@ -72,14 +81,20 @@ engines:
   - name: baidu
     engine: baidu
     shortcut: bd
-    timeout: 10.0
+    timeout: 15.0
     disabled: false
+    # 降低请求频率，减少 CAPTCHA 触发概率
+    interval: 3.0
+    # 使用国内镜像（如果可用）
+    base_url: https://www.baidu.com
 
   - name: sogou
     engine: sogou
     shortcut: sg
-    timeout: 10.0
+    timeout: 15.0
     disabled: false
+    # 降低请求频率，减少 CAPTCHA 触发概率
+    interval: 3.0
 
   # 知识类
   - name: wikipedia

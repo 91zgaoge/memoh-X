@@ -142,6 +142,7 @@ func (e *Executor) CallTool(ctx context.Context, session mcpgw.ToolSessionContex
 			size:      size,
 			platform:  platform,
 			target:    target,
+			reqID:     session.ReqID, // Pass original req_id for passive reply mode
 		})
 	}()
 
@@ -160,6 +161,7 @@ type generateRequest struct {
 	size      string
 	platform  string
 	target    string
+	reqID     string // 原始消息的 req_id，用于被动回复模式发送图片
 }
 
 func (e *Executor) generateAndSend(ctx context.Context, req generateRequest) {
@@ -183,16 +185,26 @@ func (e *Executor) generateAndSend(ctx context.Context, req generateRequest) {
 		e.logger.Error("failed to save generated image", slog.Any("error", writeErr))
 	}
 
+	// Build message with metadata containing req_id for passive reply mode
+	// This ensures images are sent using CmdRespondMsg instead of CmdSendMsg
+	msg := channel.Message{
+		Attachments: []channel.Attachment{{
+			Type: channel.AttachmentImage,
+			Data: imageBytes,
+			Name: filename,
+			Mime: "image/png",
+		}},
+	}
+	// If we have the original req_id, pass it to enable passive reply mode
+	if req.reqID != "" {
+		msg.Metadata = map[string]any{
+			"req_id": req.reqID,
+		}
+	}
+
 	sendErr := e.channelManager.Send(ctx, req.botID, channel.ChannelType(req.platform), channel.SendRequest{
-		Target: req.target,
-		Message: channel.Message{
-			Attachments: []channel.Attachment{{
-				Type: channel.AttachmentImage,
-				Data: imageBytes,
-				Name: filename,
-				Mime: "image/png",
-			}},
-		},
+		Target:  req.target,
+		Message: msg,
 	})
 	if sendErr != nil {
 		e.logger.Error("failed to send generated image",
@@ -540,7 +552,13 @@ func (e *Executor) resolveImageModel(ctx context.Context, botID string) (string,
 }
 
 func (e *Executor) sendErrorNotification(ctx context.Context, req generateRequest, genErr error) {
-	msg := fmt.Sprintf("Image generation failed: %v", genErr)
+	msg := fmt.Sprintf("❌ 图片生成失败\n\n错误: %v", genErr)
+
+	// Add helpful message if the model doesn't support image generation
+	if strings.Contains(genErr.Error(), "text-only response") {
+		msg += "\n\n💡 提示: 当前配置的模型不支持图片生成。请在机器人设置中配置支持图片生成的模型，例如:\n- gemini-2.0-flash-exp-image-generation\n- 或其他支持图像生成的模型"
+	}
+
 	sendErr := e.channelManager.Send(ctx, req.botID, channel.ChannelType(req.platform), channel.SendRequest{
 		Target: req.target,
 		Message: channel.Message{

@@ -104,3 +104,4 @@ config.toml
 .workdocs/
 /data
 _main-ref/
+.claude/
