@@ -2,6 +2,9 @@ package wecom
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -358,6 +361,7 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 }
 
 // Send sends a message directly (non-streaming)
+// Supports text messages and image attachments via msg_item
 func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg channel.OutboundMessage) error {
 	// Get WebSocket client for this bot
 	a.mu.RLock()
@@ -397,16 +401,45 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 	// Build response content
 	content := msg.Message.Text
 	if content == "" && len(msg.Message.Attachments) > 0 {
-		content = "[附件消息]"
+		content = "[图片]"
+	}
+
+	// Build msg_item for image attachments
+	var msgItems []ReplyMsgItem
+	for _, att := range msg.Message.Attachments {
+		if att.Type == channel.AttachmentImage && len(att.Data) > 0 {
+			// Convert image data to base64
+			base64Data := base64.StdEncoding.EncodeToString(att.Data)
+			// Calculate MD5
+			md5Hash := md5.Sum(att.Data)
+			md5Str := hex.EncodeToString(md5Hash[:])
+
+			msgItems = append(msgItems, ReplyMsgItem{
+				MsgType: MsgTypeImage,
+				Image: struct {
+					Base64 string `json:"base64"`
+					MD5    string `json:"md5"`
+				}{
+					Base64: base64Data,
+					MD5:    md5Str,
+				},
+			})
+
+			a.logger.Info("[MSG_ROUTE] attaching image to message",
+				slog.String("filename", att.Name),
+				slog.Int("size_bytes", len(att.Data)),
+				slog.String("md5", md5Str))
+		}
 	}
 
 	// Send as stream with finish=true
 	body := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
-			ID:      generateStreamID(),
-			Finish:  true,
-			Content: content,
+			ID:       generateStreamID(),
+			Finish:   true,
+			Content:  content,
+			MsgItem:  msgItems,
 		},
 	}
 
