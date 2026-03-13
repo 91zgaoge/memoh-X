@@ -882,13 +882,14 @@ func (s *OutboundStream) sendSegmentedContent(ctx context.Context, content strin
 			slog.Int("total", len(segments)))
 	}
 
-	// CRITICAL: 发送一个空的 finish=true 消息来正式结束流式消息
-	// 内容保持为空或很短，避免覆盖第一段的内容
-	if err := s.sendStreamContent(ctx, "✓", true); err != nil {
+	// CRITICAL: 发送 finish=true 消息来正式结束流式消息
+	// 使用第一段的内容，避免覆盖（企业微信流式消息机制：finish=true 会覆盖之前的内容）
+	// 注意：这里必须重复发送第一段内容作为 finish=true，否则第一段会被空内容覆盖
+	if err := s.sendStreamContent(ctx, firstSegment, true); err != nil {
 		s.logger.Warn("failed to send stream finish message", slog.Any("error", err))
 		// 不返回错误，因为主要内容已经发送成功
 	} else {
-		s.logger.Info("stream finished")
+		s.logger.Info("stream finished with first segment content")
 	}
 
 	s.sent.Store(true)
@@ -961,12 +962,15 @@ func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content stri
 	// 生成新的 req_id（CmdSendMsg 必须使用新的 req_id）
 	reqID := generateReqID(CmdSendMsg)
 
-	// 确定 chat_type
+	// 确定 chat_type 和 target_chat_id
 	var chatTypeInt int
+	var targetChatID string
 	if chatType == "single" {
 		chatTypeInt = ChatTypeSingle
+		targetChatID = userID
 	} else {
 		chatTypeInt = ChatTypeGroup
+		targetChatID = chatID
 	}
 
 	// 构建 Markdown 消息体
@@ -975,6 +979,7 @@ func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content stri
 		Markdown: MarkdownContent{
 			Content: content,
 		},
+		ChatID:   targetChatID,
 		ChatType: chatTypeInt,
 	}
 

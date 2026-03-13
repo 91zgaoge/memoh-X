@@ -294,6 +294,9 @@ const (
 type SendMarkdownMsgBody struct {
 	MsgType  string          `json:"msgtype"`
 	Markdown MarkdownContent `json:"markdown"`
+	// ChatID 会话 ID，用于指定消息发送目标
+	// 单聊时为用户 userid，群聊时为群 chatid
+	ChatID string `json:"chatid,omitempty"`
 	// ChatType 会话类型，用于指定 chatid 的解析方式
 	// 1：单聊（用户 userid）；2：群聊；0 或不填：兼容单聊/群聊类型，优先按照群聊会话类型去发送消息
 	// 建议开发者设置具体的单聊或者群聊来使用
