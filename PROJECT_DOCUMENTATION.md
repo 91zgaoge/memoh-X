@@ -25,6 +25,7 @@
 | 配额感知 | ✅ | 24h 被动回复窗口追踪（30条上限） |
 | 入群欢迎语 | ✅ | enter_chat 事件自动发送欢迎消息 |
 | 流式节流 | ✅ | Reasoning 阶段 800ms 节流，防止队列溢出 |
+| 图片发送 | ✅ | WebSocket 长连接支持发送 base64 图片 |
 
 #### 1.2 关键 Bug 修复
 
@@ -43,6 +44,21 @@
 - **问题**: 主动发送消息 (CmdSendMsg) 时缺少 req_id
 - **修复**: OpenStream 方法为 CmdSendMsg 模式生成新的 req_id
 - **文件**: `internal/channel/adapters/wecom/adapter.go:405-415`
+
+**图片发送功能修复 (2026-03-13)**
+- **问题**: MCP 图片生成后无法发送给用户，WeCom 适配器只发送 `[附件消息]` 文本
+- **根因**: `Send` 方法未处理 `Attachments` 字段，忽略了图片数据
+- **修复**:
+  - 修改 `Send` 方法支持图片附件
+  - 将图片转为 base64 编码，通过 `msg_item` 字段发送
+  - 计算图片 MD5 值用于企业微信校验
+- **文件**: `internal/channel/adapters/wecom/adapter.go:361-415`
+- **图片生成流程**:
+  1. 用户发送 "画一只可爱的猫咪"
+  2. Bot 调用 `z-image.generate_image_tool` 工具
+  3. 生成图片并保存到 `/opt/memoh/data/bots/{bot_id}/media/`
+  4. `generateAndSend` 调用 `channelManager.Send` 发送消息
+  5. WeCom 适配器将图片转为 base64 并通过 WebSocket 发送
 
 ### 2. 基础设施修复
 
@@ -178,6 +194,9 @@ docker exec -i memoh-postgres psql -U memoh < volumes/postgres_dump.sql
 
 | 时间 | 提交 | 说明 |
 |------|------|------|
+| 2026-03-13 | fe8009e5 | 支持 WebSocket 发送图片附件 |
+| 2026-03-13 | 5b75a71d | 添加项目文档 |
+| 2026-03-13 | 454f6e5a | 更新数据库恢复说明 |
 | 2026-03-13 | 4aad5888 | 修复分段消息 streamID 覆盖问题 |
 | 2026-03-13 | d9ab32eb | 修复主动发送消息缺少 req_id |
 | 2026-03-13 | fe7f72c0 | 修复 panic: close of closed channel |
