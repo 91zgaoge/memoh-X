@@ -214,6 +214,7 @@ function channelIcon(type: string): string {
   const icons: Record<string, string> = {
     telegram: 'TG',
     feishu: '飞',
+    wecom: '企',
   }
   return icons[type] ?? type.slice(0, 2).toUpperCase()
 }
@@ -222,6 +223,7 @@ function channelBadgeClass(type: string): string {
   const classes: Record<string, string> = {
     telegram: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
     feishu: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300',
+    wecom: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
   }
   return classes[type] ?? 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
 }

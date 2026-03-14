@@ -56,6 +56,9 @@ type Adapter struct {
 
 	// Message deduplication manager
 	dedupManager *DedupManager
+
+	// Token cache for contacts API
+	tokenCache *tokenCache
 }
 
 // NewWeComAdapter creates a new WeCom adapter (alias for NewAdapter for compatibility)
@@ -153,6 +156,24 @@ func (a *Adapter) Descriptor() channel.Descriptor {
 					Required:    false,
 					Title:       "需要@提及",
 					Description: "群聊中是否需要@机器人才响应",
+				},
+				"corp_id": {
+					Type:        channel.FieldString,
+					Required:    false,
+					Title:       "企业ID (CorpID)",
+					Description: "企业微信自建应用的企业ID，用于通讯录查询功能",
+				},
+				"corp_secret": {
+					Type:        channel.FieldSecret,
+					Required:    false,
+					Title:       "应用凭证 (CorpSecret)",
+					Description: "企业微信自建应用的Secret，用于获取通讯录访问权限",
+				},
+				"agent_id": {
+					Type:        channel.FieldString,
+					Required:    false,
+					Title:       "应用ID (AgentID)",
+					Description: "企业微信自建应用的AgentID，用于通过自建应用发送消息",
 				},
 			},
 		},
@@ -432,14 +453,79 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 		}
 	}
 
-	// Send as stream with finish=true
+	// CRITICAL: Use different message body based on command type
+	// CmdSendMsg (proactive) requires SendMarkdownMsgBody with chatid and chat_type
+	// CmdRespondMsg (reply) uses StreamMsgBody
+	if cmd == CmdSendMsg {
+		// Parse target to determine chatid and chat_type
+		// Target format: "user_id:xxx", "chat_id:xxx", or "name:xxx" (lookup by name)
+		chatID := ""
+		chatTypeInt := ChatTypeAuto // 0 = auto (default)
+
+		target := strings.TrimSpace(msg.Target)
+
+		// Handle name:xxx format - lookup user by name
+		if strings.HasPrefix(target, "name:") {
+			name := strings.TrimPrefix(target, "name:")
+			name = strings.TrimSpace(name)
+			if name != "" {
+				// Lookup user by name using directory adapter
+				entry, err := a.ResolveEntry(ctx, cfg, name, channel.DirectoryEntryUser)
+				if err != nil {
+					a.logger.Error("[SEND] failed to resolve user by name",
+						slog.String("name", name),
+						slog.Any("error", err))
+					return fmt.Errorf("user not found by name: %s", name)
+				}
+				// Extract user ID from entry (format: "userid:xxx")
+				userID := strings.TrimPrefix(entry.ID, "userid:")
+				target = "user_id:" + userID
+				a.logger.Info("[SEND] resolved name to user_id",
+					slog.String("name", name),
+					slog.String("user_id", userID))
+			}
+		}
+
+		if strings.HasPrefix(target, "user_id:") {
+			chatID = strings.TrimPrefix(target, "user_id:")
+			chatTypeInt = ChatTypeSingle // 1 = single chat
+		} else if strings.HasPrefix(target, "chat_id:") {
+			chatID = strings.TrimPrefix(target, "chat_id:")
+			chatTypeInt = ChatTypeGroup // 2 = group chat
+		} else if target != "" {
+			// Fallback: use target directly as chatid with auto type
+			chatID = target
+		}
+
+		a.logger.Info("[MSG_ROUTE] Send proactive message",
+			slog.String("req_id", reqID),
+			slog.String("target", target),
+			slog.String("chat_id", chatID),
+			slog.Int("chat_type", chatTypeInt),
+			slog.Int("content_bytes", len([]byte(content))))
+
+		// Use SendMarkdownMsgBody for proactive send (CmdSendMsg)
+		// SDK requires: chatid (target), chat_type (1=single, 2=group)
+		body := SendMarkdownMsgBody{
+			MsgType: MsgTypeMarkdown,
+			Markdown: MarkdownContent{
+				Content: content,
+			},
+			ChatID:   chatID,
+			ChatType: chatTypeInt,
+		}
+
+		return wsClient.SendReply(ctx, reqID, body, cmd)
+	}
+
+	// Use StreamMsgBody for respond (CmdRespondMsg)
 	body := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
-			ID:       generateStreamID(),
-			Finish:   true,
-			Content:  content,
-			MsgItem:  msgItems,
+			ID:      generateStreamID(),
+			Finish:  true,
+			Content: content,
+			MsgItem: msgItems,
 		},
 	}
 

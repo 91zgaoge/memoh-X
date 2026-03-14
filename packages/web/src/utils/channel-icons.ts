@@ -7,6 +7,7 @@
 const LOCAL_CHANNEL_IMAGES: Record<string, string> = {
   feishu: '/channels/feishu.png',
   telegram: '/channels/telegram.webp',
+  wecom: '/channels/wecom.png',
 }
 
 const CHANNEL_ICONS: Record<string, [string, string]> = {
@@ -14,6 +15,7 @@ const CHANNEL_ICONS: Record<string, [string, string]> = {
   feishu: ['fas', 'comment-dots'],
   web: ['fas', 'globe'],
   discord: ['fab', 'discord'],
+  wecom: ['fas', 'building'],
 }
 
 const DEFAULT_ICON: [string, string] = ['far', 'comment']

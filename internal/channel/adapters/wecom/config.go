@@ -25,6 +25,13 @@ type Config struct {
 	Secret       string `json:"secret"`
 	WebsocketURL string `json:"websocket_url"`
 
+	// Corp credentials for contacts API (directory lookup)
+	CorpID     string `json:"corp_id"`
+	CorpSecret string `json:"corp_secret"`
+
+	// Agent ID for self-built app messaging
+	AgentID string `json:"agent_id"`
+
 	// Group chat settings
 	GroupChatEnabled bool `json:"group_chat_enabled"`
 	RequireMention   bool `json:"require_mention"`
@@ -204,6 +211,15 @@ func ParseConfig(raw map[string]any) (*Config, error) {
 	}
 	if wsURL, ok := raw["websocket_url"].(string); ok {
 		cfg.WebsocketURL = wsURL
+	}
+	if corpID, ok := raw["corp_id"].(string); ok {
+		cfg.CorpID = corpID
+	}
+	if corpSecret, ok := raw["corp_secret"].(string); ok {
+		cfg.CorpSecret = corpSecret
+	}
+	if agentID, ok := raw["agent_id"].(string); ok {
+		cfg.AgentID = agentID
 	}
 	if groupEnabled, ok := raw["group_chat_enabled"].(bool); ok {
 		cfg.GroupChatEnabled = groupEnabled
