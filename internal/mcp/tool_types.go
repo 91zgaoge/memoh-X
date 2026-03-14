@@ -49,6 +49,11 @@ type ToolCallPayload struct {
 // ErrToolNotFound indicates the provider does not own the requested tool.
 var ErrToolNotFound = fmt.Errorf("tool not found")
 
+// ErrToolNotCapable indicates the provider cannot handle the request due to missing
+// configuration or capability (e.g., bot has no image model configured).
+// This error triggers fallback to other sources like federation MCP.
+var ErrToolNotCapable = fmt.Errorf("tool not capable")
+
 // BuildToolSuccessResult builds a standard MCP tool success result object.
 func BuildToolSuccessResult(structured any) map[string]any {
 	result := map[string]any{}

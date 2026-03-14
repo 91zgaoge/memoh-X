@@ -2,12 +2,19 @@ package schedule
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	mcpgw "github.com/Kxiandaoyan/Memoh-v2/internal/mcp"
 	sched "github.com/Kxiandaoyan/Memoh-v2/internal/schedule"
 )
+
+// TimezoneProvider provides access to system timezone settings
+type TimezoneProvider interface {
+	GetTimezone() (string, *time.Location)
+}
 
 const (
 	toolScheduleList   = "list_schedule"
@@ -26,18 +33,32 @@ type Scheduler interface {
 }
 
 type Executor struct {
-	service Scheduler
-	logger  *slog.Logger
+	service          Scheduler
+	timezoneProvider TimezoneProvider
+	logger           *slog.Logger
 }
 
-func NewExecutor(log *slog.Logger, service Scheduler) *Executor {
+func NewExecutor(log *slog.Logger, service Scheduler, tzProvider TimezoneProvider) *Executor {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Executor{
-		service: service,
-		logger:  log.With(slog.String("provider", "schedule_tool")),
+		service:          service,
+		timezoneProvider: tzProvider,
+		logger:           log.With(slog.String("provider", "schedule_tool")),
 	}
+}
+
+// getTimezone returns the current system timezone, defaulting to UTC if not available
+func (p *Executor) getTimezone() string {
+	if p.timezoneProvider == nil {
+		return "UTC"
+	}
+	tz, _ := p.timezoneProvider.GetTimezone()
+	if tz == "" {
+		return "UTC"
+	}
+	return tz
 }
 
 func (p *Executor) ListTools(ctx context.Context, session mcpgw.ToolSessionContext) ([]mcpgw.ToolDescriptor, error) {
@@ -77,7 +98,7 @@ func (p *Executor) ListTools(ctx context.Context, session mcpgw.ToolSessionConte
 					},
 					"pattern": map[string]any{
 						"type":        "string",
-						"description": "Cron expression: 'minute hour day-of-month month day-of-week' (e.g. '30 9 * * *' for daily at 9:30, '0 */2 * * *' for every 2 hours). Supports optional seconds prefix.",
+						"description": fmt.Sprintf("Cron expression: 'minute hour day-of-month month day-of-week' (e.g. '30 9 * * *' for daily at 9:30, '0 */2 * * *' for every 2 hours). Supports optional seconds prefix. IMPORTANT TIME CONVERSION RULES: 1) System timezone is '%s' - ALWAYS use this timezone for time calculations, never assume UTC or local time, 2) For natural language times: first get current time in '%s' timezone, then calculate target time, 3) For specific dates/times (e.g., '下午5点明天去机场', '明天上午9点会议'): calculate exact date and use '0 17 DD MM *' format, AND set max_calls to 1 for one-time execution, 4) For recurring schedules (e.g., '每天下午5点提醒'): use '0 17 * * *' and do NOT set max_calls, 5) '5分钟后' -> calculate target minute and use 'MM HH * * *' with max_calls=1.", p.getTimezone(), p.getTimezone()),
 					},
 					"command": map[string]any{
 						"type":        "string",
@@ -115,7 +136,7 @@ func (p *Executor) ListTools(ctx context.Context, session mcpgw.ToolSessionConte
 					},
 					"pattern": map[string]any{
 						"type":        "string",
-						"description": "New cron expression",
+						"description": fmt.Sprintf("New cron expression. Same format rules as create. IMPORTANT: System timezone is '%s' - always use this timezone. For one-time tasks (specific dates/times), set max_calls to 1. For recurring tasks, do not set max_calls.", p.getTimezone()),
 					},
 					"max_calls": map[string]any{
 						"type":        "integer",

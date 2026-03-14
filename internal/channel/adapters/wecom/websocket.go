@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,8 +18,9 @@ const (
 	// WebSocket default URL
 	DefaultWebsocketURL = "wss://openws.work.weixin.qq.com"
 
-	// Heartbeat interval (30 seconds as per documentation)
-	HeartbeatInterval = 30 * time.Second
+	// Heartbeat interval (10 seconds for better connection stability)
+	// WeCom SDK 推荐 30 秒，但为了保持连接活跃，使用 10 秒
+	HeartbeatInterval = 10 * time.Second
 
 	// Connection timeout
 	ConnectionTimeout = 30 * time.Second
@@ -30,7 +32,7 @@ const (
 	MaxReconnectAttempts = 10
 
 	// Max missed pong before reconnect
-	MaxMissedPong = 2
+	MaxMissedPong = 3
 
 	// Reply ack timeout - 与 SDK 保持一致为 5 秒
 	// SDK (ws.ts:55) 使用 5000ms，我们保持一致以确保可靠性
@@ -38,6 +40,9 @@ const (
 
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
+
+	// Read deadline - 必须大于心跳间隔，给足够的时间接收响应
+	ReadDeadlineTimeout = 30 * time.Second
 )
 
 // MessageHandler is the callback for processing received messages
@@ -233,9 +238,13 @@ func (c *WebSocketClient) connect(ctx context.Context) error {
 
 	// Set up WebSocket keepalive
 	// This is critical to detect connection drops early
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(ReadDeadlineTimeout))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.mu.Lock()
+		if c.conn != nil {
+			c.conn.SetReadDeadline(time.Now().Add(ReadDeadlineTimeout))
+		}
+		c.mu.Unlock()
 		c.missedPongCount = 0
 		c.logger.Debug("websocket pong received")
 		return nil
@@ -351,14 +360,26 @@ func (c *WebSocketClient) run(ctx context.Context) {
 func (c *WebSocketClient) messageReader(ctx context.Context, ch chan<- error) {
 	for {
 		if !c.IsConnected() {
-			time.Sleep(ReconnectDelay)
-			continue
+			select {
+			case <-time.After(ReconnectDelay):
+				continue
+			case <-ctx.Done():
+				return
+			}
 		}
 
 		if err := c.readMessage(ctx); err != nil {
+			// Check if this is a connection closed error (normal shutdown)
+			errStr := err.Error()
+			if strings.Contains(errStr, "use of closed network connection") ||
+				strings.Contains(errStr, "websocket: close sent") {
+				c.logger.Debug("message reader stopping due to closed connection")
+				return
+			}
+
 			select {
 			case ch <- err:
-				return // Exit after sending error
+				return // Exit after sending error to trigger reconnect
 			case <-ctx.Done():
 				return
 			}
@@ -376,9 +397,9 @@ func (c *WebSocketClient) readMessage(ctx context.Context) error {
 		return fmt.Errorf("connection is nil")
 	}
 
-	// Reset read deadline - give 60 seconds to receive next message
+	// Reset read deadline - give enough time to receive next message
 	// This detects connection drops while allowing for idle periods
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(ReadDeadlineTimeout))
 
 	var msg WebsocketMessage
 	if err := conn.ReadJSON(&msg); err != nil {
@@ -386,7 +407,7 @@ func (c *WebSocketClient) readMessage(ctx context.Context) error {
 	}
 
 	// Reset read deadline after successful read
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(ReadDeadlineTimeout))
 
 	c.logger.Info("websocket message received",
 		slog.String("cmd", msg.Cmd),
@@ -395,14 +416,18 @@ func (c *WebSocketClient) readMessage(ctx context.Context) error {
 		slog.Int("body_len", len(msg.Body)))
 
 	// Handle based on cmd type
+	// CRITICAL: Use context.WithoutCancel to ensure message processing
+	// continues even if the WebSocket connection is closed/reconnected.
+	// The handler should not be affected by connection lifecycle.
+	handlerCtx := context.WithoutCancel(ctx)
 	switch msg.Cmd {
 	case CmdMsgCallback:
-		if err := c.handler(ctx, &msg); err != nil {
+		if err := c.handler(handlerCtx, &msg); err != nil {
 			c.logger.Error("handle message callback failed", slog.Any("error", err))
 		}
 
 	case CmdEventCallback:
-		if err := c.handler(ctx, &msg); err != nil {
+		if err := c.handler(handlerCtx, &msg); err != nil {
 			c.logger.Error("handle event callback failed", slog.Any("error", err))
 		}
 
@@ -532,7 +557,31 @@ func (c *WebSocketClient) sendHeartbeat() error {
 	return nil
 }
 
-// triggerReconnect triggers a reconnection
+// sendFrame sends a frame directly without queuing or waiting for ACK.
+// This is used for time-critical messages like the "thinking" reply
+// that must be sent within the 5-second ACK window.
+func (c *WebSocketClient) sendFrame(frame WebsocketMessage) error {
+	c.mu.RLock()
+	conn := c.conn
+	connected := c.connected
+	c.mu.RUnlock()
+
+	if !connected || conn == nil {
+		return fmt.Errorf("websocket not connected")
+	}
+
+	if err := conn.WriteJSON(frame); err != nil {
+		return fmt.Errorf("write frame: %w", err)
+	}
+
+	c.logger.Debug("frame sent directly",
+		slog.String("req_id", frame.Headers.ReqID),
+		slog.String("cmd", frame.Cmd))
+	return nil
+}
+
+// triggerReconnect triggers a reconnection with a small delay
+// to avoid rapid reconnection loops
 func (c *WebSocketClient) triggerReconnect() {
 	select {
 	case c.reconnectCh <- struct{}{}:
@@ -837,13 +886,16 @@ type promiseFunc func(resolve func(WebsocketMessage), reject func(error))
 func newPromise(fn promiseFunc) error {
 	done := make(chan struct{})
 	var resultErr error
+	var once sync.Once
 
 	resolve := func(WebsocketMessage) {
-		close(done)
+		once.Do(func() { close(done) })
 	}
 	reject := func(err error) {
-		resultErr = err
-		close(done)
+		once.Do(func() {
+			resultErr = err
+			close(done)
+		})
 	}
 
 	fn(resolve, reject)

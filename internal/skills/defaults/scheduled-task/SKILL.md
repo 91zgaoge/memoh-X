@@ -97,7 +97,21 @@ Confirm the following with the user:
 
 ## Important Notes
 
-- **Relative time handling**: When users specify relative times like "in X minutes / tomorrow at 9 AM / this afternoon", first get the current local time using a system command, then calculate the target time. Don't guess the current time or use UTC.
+- **Critical: Timezone Awareness**: The system has a configured timezone (e.g., 'Asia/Shanghai'). ALWAYS get current time in THIS timezone for calculations. Using wrong timezone will cause schedules to fire at wrong times.
+
+- **One-time vs Recurring Tasks**: This is CRITICAL - ask yourself: does the user want this to happen once or repeatedly?
+  - **One-time tasks** (specific date/time mentioned like "明天下午5点去机场", "后天上午9点开会"): Calculate the EXACT date, use format `0 17 DD MM *`, AND set `max_calls: 1`
+  - **Recurring tasks** (words like "每天", "每周", "each day", "every week"): Use standard cron like `0 17 * * *`, do NOT set max_calls
+  - When in doubt, ask the user if this is a one-time or recurring task
+
+- **Natural language time conversion**: When users specify times like "下午5点/5 PM", "明天上午9点", "5分钟后", "this afternoon":
+  1. **Get current time in system timezone** using a system command with TZ set (e.g., `TZ=Asia/Shanghai date` or Node.js with timezone)
+  2. **Calculate the exact target time** based on current time in that timezone
+  3. **Convert to cron expression**:
+     - "下午5点/17:00 每天" (recurring) → `0 17 * * *` (no max_calls)
+     - "明天下午5点去机场" (one-time) → Calculate tomorrow's date, use `0 17 DD MM *` + `max_calls: 1`
+     - "5分钟后" → Calculate target minute, use `MM HH * * *` + `max_calls: 1`
+  4. **DO NOT** interpret "5点" as "5 minutes" - "点" means "o'clock" in Chinese
 - **Creation timing**: For short-delay one-time tasks (e.g., "in 1 minute"), create the task immediately before performing any time-consuming operations. Don't fetch data or summarize content before creating the task.
 - **Prompt boundaries**: The `prompt` should describe "what to do when the task triggers", not pre-execute the task and embed static results. Example: write "Fetch yesterday's AI news and send summary" instead of fetching news first and embedding the list in the prompt.
 - **Get current time** (cross-platform):

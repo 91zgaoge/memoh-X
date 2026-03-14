@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"path"
 	"sort"
@@ -267,9 +268,19 @@ func NewResolver(
 		logger:            log.With(slog.String("service", "conversation_resolver")),
 		httpClient:      &http.Client{Timeout: timeout},
 		streamingClient: &http.Client{
+			// No Timeout field - let the context control the overall request lifecycle
+			// This allows long-running streams for tasks like image generation (3-7 minutes)
 			Transport: &http.Transport{
-				ResponseHeaderTimeout: 120 * time.Second, // max wait for first response byte
-				IdleConnTimeout:       180 * time.Second, // increased for long-running tasks
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       180 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				ResponseHeaderTimeout: 120 * time.Second,
 			},
 		},
 	}

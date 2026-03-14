@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,6 +126,10 @@ func (e *Executor) CallTool(ctx context.Context, session mcpgw.ToolSessionContex
 
 	modelName, apiKey, baseURL, err := e.resolveImageModel(ctx, botID)
 	if err != nil {
+		// Return ErrToolNotCapable to trigger fallback to MCP federation
+		if errors.Is(err, mcpgw.ErrToolNotCapable) {
+			return nil, mcpgw.ErrToolNotCapable
+		}
 		return mcpgw.BuildToolErrorResult(fmt.Sprintf("cannot resolve image model: %v", err)), nil
 	}
 
@@ -542,7 +547,7 @@ func (e *Executor) resolveImageModel(ctx context.Context, botID string) (string,
 		return "", "", "", fmt.Errorf("failed to get provider: %w", err)
 	}
 	if provider.ClientType != string(providers.ClientTypeGoogle) {
-		return "", "", "", fmt.Errorf("image generation requires a Google/Gemini provider or a dedicated Image Model in bot settings (current chat provider: %s)", provider.ClientType)
+		return "", "", "", mcpgw.ErrToolNotCapable
 	}
 	apiKey := strings.TrimSpace(provider.ApiKey)
 	if apiKey == "" {

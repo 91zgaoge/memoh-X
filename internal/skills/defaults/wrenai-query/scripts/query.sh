@@ -3,17 +3,60 @@
 # WrenAI Query Skill Script
 # Natural language to SQL query interface for WrenAI
 #
+# This script automatically falls back to Python implementation if jq is not available
+#
 
 set -e
 
-# Configuration
+# Get script directory for fallback
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if jq is available, if not use Python implementation
+if ! command -v jq &>/dev/null; then
+    PYTHON_SCRIPT="${SCRIPT_DIR}/query.py"
+
+    if [[ -f "$PYTHON_SCRIPT" ]]; then
+        exec python3 "$PYTHON_SCRIPT" "$@"
+    else
+        echo '{"success":false,"error":{"code":"MISSING_DEPENDENCY","message":"jq is required but not installed, and Python fallback (query.py) is not available"}}'
+        exit 1
+    fi
+fi
+
+# Configuration
 SKILL_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Function: Auto-detect WrenAI host
+# Tries multiple addresses to handle different network environments
+detect_wrenai_host() {
+    local default_host="${WRENAI_HOST:-}"
+    if [[ -n "$default_host" ]]; then
+        echo "$default_host"
+        return 0
+    fi
+
+    # Try different host addresses in order of preference
+    # 10.62.239.13 is the host IP that works from both host and containers
+    local hosts=("10.62.239.13" "172.17.0.1" "host.docker.internal" "localhost")
+
+    for host in "${hosts[@]}"; do
+        if curl -sf --max-time 3 "http://$host:5555/health" &>/dev/null; then
+            echo "$host"
+            return 0
+        fi
+    done
+
+    # Fallback to 10.62.239.13 (host IP)
+    echo "10.62.239.13"
+}
+
+# Auto-detect WrenAI host
+WRENAI_HOST=$(detect_wrenai_host)
+
 # Default WrenAI instance URLs
-WRENAI_PG_URL="${WRENAI_PG_URL:-http://localhost:5555}"
-WRENAI_MSSQL_URL="${WRENAI_MSSQL_URL:-http://localhost:6555}"
-WRENAI_HR_URL="${WRENAI_HR_URL:-http://localhost:7555}"
+WRENAI_PG_URL="${WRENAI_PG_URL:-http://${WRENAI_HOST}:5555}"
+WRENAI_MSSQL_URL="${WRENAI_MSSQL_URL:-http://${WRENAI_HOST}:6555}"
+WRENAI_HR_URL="${WRENAI_HR_URL:-http://${WRENAI_HOST}:7555}"
 
 # Colors for output (disabled if not terminal)
 if [[ -t 1 ]]; then
@@ -181,7 +224,7 @@ submit_query() {
 
     # Submit query
     local response
-    response=$(curl -sf -X POST \
+    response=$(curl -sf --max-time 30 -X POST \
         -H "Content-Type: application/json" \
         -d "$request_body" \
         "$api_url" 2>&1) || {
@@ -207,7 +250,7 @@ submit_query() {
 poll_results() {
     local url="$1"
     local query_id="$2"
-    local max_attempts=60
+    local max_attempts=180    # Increased from 60 to 180 (6 minutes max)
     local interval=2
 
     local result_url="${url}/v1/asks/${query_id}/result"
@@ -216,7 +259,7 @@ poll_results() {
 
     for ((i=1; i<=max_attempts; i++)); do
         local response
-        response=$(curl -sf "$result_url" 2>&1) || {
+        response=$(curl -sf --max-time 10 "$result_url" 2>&1) || {
             echo -e "${RED}Error: Failed to fetch results${NC}" >&2
             return 1
         }
@@ -240,9 +283,10 @@ poll_results() {
                 return 1
                 ;;
             *)
-                # Still processing
-                if (( i % 5 == 0 )); then
-                    echo -e "${BLUE}  Still processing... ($i/$max_attempts)${NC}" >&2
+                # Still processing - output progress to keep connection alive
+                local elapsed=$((i * interval))
+                if (( i % 3 == 0 )); then
+                    echo -e "${BLUE}  ⏳ WrenAI 正在分析查询... (${elapsed}秒)${NC}" >&2
                 fi
                 sleep $interval
                 ;;

@@ -51,7 +51,7 @@ func (f *fakeScheduler) Delete(ctx context.Context, id string) error {
 }
 
 func TestExecutor_ListTools_NilService(t *testing.T) {
-	exec := NewExecutor(nil, nil)
+	exec := NewExecutor(nil, nil, nil)
 	tools, err := exec.ListTools(context.Background(), mcpgw.ToolSessionContext{})
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func TestExecutor_ListTools_NilService(t *testing.T) {
 
 func TestExecutor_ListTools(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	tools, err := exec.ListTools(context.Background(), mcpgw.ToolSessionContext{})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestExecutor_ListTools(t *testing.T) {
 
 func TestExecutor_CallTool_NotFound(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	_, err := exec.CallTool(context.Background(), mcpgw.ToolSessionContext{BotID: "bot1"}, "other_tool", nil)
 	if err != mcpgw.ErrToolNotFound {
 		t.Errorf("expected ErrToolNotFound, got %v", err)
@@ -89,7 +89,7 @@ func TestExecutor_CallTool_NotFound(t *testing.T) {
 }
 
 func TestExecutor_CallTool_NilService(t *testing.T) {
-	exec := NewExecutor(nil, nil)
+	exec := NewExecutor(nil, nil, nil)
 	result, err := exec.CallTool(context.Background(), mcpgw.ToolSessionContext{BotID: "bot1"}, toolScheduleList, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestExecutor_CallTool_NilService(t *testing.T) {
 
 func TestExecutor_CallTool_NoBotID(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	result, err := exec.CallTool(context.Background(), mcpgw.ToolSessionContext{}, toolScheduleList, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestExecutor_CallTool_List(t *testing.T) {
 			{ID: "id1", Name: "n1", BotID: "bot1"},
 		},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleList, nil)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestExecutor_CallTool_List(t *testing.T) {
 
 func TestExecutor_CallTool_Get_IdRequired(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleGet, map[string]any{})
 	if err != nil {
@@ -153,7 +153,7 @@ func TestExecutor_CallTool_Get_BotMismatch(t *testing.T) {
 	svc := &fakeScheduler{
 		get: sched.Schedule{ID: "s1", BotID: "other-bot"},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleGet, map[string]any{"id": "s1"})
 	if err != nil {
@@ -168,7 +168,7 @@ func TestExecutor_CallTool_Get_Success(t *testing.T) {
 	svc := &fakeScheduler{
 		get: sched.Schedule{ID: "s1", Name: "job1", BotID: "bot1"},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleGet, map[string]any{"id": "s1"})
 	if err != nil {
@@ -188,7 +188,7 @@ func TestExecutor_CallTool_Get_Success(t *testing.T) {
 
 func TestExecutor_CallTool_Create_RequiredFields(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleCreate, map[string]any{
 		"name": "n", "description": "d", "pattern": "* * * * *",
@@ -208,7 +208,7 @@ func TestExecutor_CallTool_Create_Success(t *testing.T) {
 			BotID: "bot1", CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleCreate, map[string]any{
 		"name": "n1", "description": "d1", "pattern": "* * * * *", "command": "echo",
@@ -230,7 +230,7 @@ func TestExecutor_CallTool_Create_Success(t *testing.T) {
 
 func TestExecutor_CallTool_Update_IdRequired(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleUpdate, map[string]any{"name": "n"})
 	if err != nil {
@@ -245,7 +245,7 @@ func TestExecutor_CallTool_Update_Success(t *testing.T) {
 	svc := &fakeScheduler{
 		update: sched.Schedule{ID: "s1", Name: "updated", BotID: "bot1"},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleUpdate, map[string]any{
 		"id": "s1", "name": "updated",
@@ -260,7 +260,7 @@ func TestExecutor_CallTool_Update_Success(t *testing.T) {
 
 func TestExecutor_CallTool_Delete_IdRequired(t *testing.T) {
 	svc := &fakeScheduler{}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleDelete, map[string]any{})
 	if err != nil {
@@ -275,7 +275,7 @@ func TestExecutor_CallTool_Delete_BotMismatch(t *testing.T) {
 	svc := &fakeScheduler{
 		get: sched.Schedule{ID: "s1", BotID: "other-bot"},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleDelete, map[string]any{"id": "s1"})
 	if err != nil {
@@ -290,7 +290,7 @@ func TestExecutor_CallTool_Delete_Success(t *testing.T) {
 	svc := &fakeScheduler{
 		get: sched.Schedule{ID: "s1", BotID: "bot1"},
 	}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleDelete, map[string]any{"id": "s1"})
 	if err != nil {
@@ -310,7 +310,7 @@ func TestExecutor_CallTool_Delete_Success(t *testing.T) {
 
 func TestExecutor_CallTool_Get_ServiceError(t *testing.T) {
 	svc := &fakeScheduler{getErr: errors.New("not found")}
-	exec := NewExecutor(nil, svc)
+	exec := NewExecutor(nil, svc, nil)
 	session := mcpgw.ToolSessionContext{BotID: "bot1"}
 	result, err := exec.CallTool(context.Background(), session, toolScheduleGet, map[string]any{"id": "missing"})
 	if err != nil {

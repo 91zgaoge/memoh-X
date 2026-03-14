@@ -224,8 +224,23 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 		},
 	}
 
-	// Use SendStream for thinking reply (fire-and-forget, no ACK wait)
-	if err := wsClient.SendStream(ctx, reqID, thinkingBody); err != nil {
+	// CRITICAL FIX: Send thinking reply immediately without queuing or ACK wait
+	// This ensures we respond within the 5-second ACK window to prevent interruption
+	// The thinking reply is best-effort; if it fails, we continue processing anyway
+	bodyBytes, err := json.Marshal(thinkingBody)
+	if err != nil {
+		a.logger.Debug("failed to marshal thinking reply", slog.Any("error", err))
+		return
+	}
+
+	frame := WebsocketMessage{
+		Cmd:     CmdRespondMsg,
+		Headers: MessageHeaders{ReqID: reqID},
+		Body:    bodyBytes,
+	}
+
+	// Send directly without queuing - fire and forget
+	if err := wsClient.sendFrame(frame); err != nil {
 		a.logger.Debug("failed to send thinking reply", slog.Any("error", err))
 	} else {
 		a.logger.Info("thinking reply sent", slog.String("req_id", reqID), slog.String("stream_id", streamID))
@@ -559,6 +574,183 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 	return wsClient.SendReply(ctx, reqID, body, cmd)
 }
 
+// processQuoteContent processes quote content and returns text and attachments
+func (a *Adapter) processQuoteContent(ctx context.Context, quote *QuoteContent, reqID string) (string, []channel.Attachment) {
+	if quote == nil {
+		return "", nil
+	}
+
+	var textParts []string
+	var attachments []channel.Attachment
+
+	switch quote.MsgType {
+	case MsgTypeText:
+		if quote.Text != nil && quote.Text.Content != "" {
+			textParts = append(textParts, "[引用文本] "+quote.Text.Content)
+		}
+
+	case MsgTypeImage:
+		if quote.Image != nil {
+			a.logger.Info("processing quote image",
+				slog.String("req_id", reqID),
+				slog.String("url", quote.Image.URL))
+			result, err := a.downloadAndDecrypt(quote.Image.URL, quote.Image.AESKey)
+			if err != nil {
+				a.logger.Error("failed to download/decrypt quote image",
+					slog.String("req_id", reqID),
+					slog.Any("error", err))
+				// Add reference without data
+				attachments = append(attachments, channel.Attachment{
+					Type: channel.AttachmentImage,
+					URL:  quote.Image.URL,
+					Metadata: map[string]any{
+						"aeskey": quote.Image.AESKey,
+						"source": "quote",
+					},
+				})
+				textParts = append(textParts, "[引用图片 (无法下载)]")
+			} else {
+				attachments = append(attachments, channel.Attachment{
+					Type:     channel.AttachmentImage,
+					URL:      quote.Image.URL,
+					Data:     result.Data,
+					Metadata: map[string]any{
+						"aeskey": quote.Image.AESKey,
+						"size":   len(result.Data),
+						"source": "quote",
+					},
+				})
+				textParts = append(textParts, "[引用图片]")
+			}
+		}
+
+	case MsgTypeFile:
+		if quote.File != nil {
+			fileName := quote.File.FileName
+			if fileName == "" {
+				fileName = extractFileNameFromURL(quote.File.URL)
+			}
+			a.logger.Info("processing quote file",
+				slog.String("req_id", reqID),
+				slog.String("filename", fileName),
+				slog.String("url", quote.File.URL))
+
+			result, err := a.downloadAndDecrypt(quote.File.URL, quote.File.AESKey)
+			if err != nil {
+				a.logger.Error("failed to download/decrypt quote file",
+					slog.String("req_id", reqID),
+					slog.String("filename", fileName),
+					slog.Any("error", err))
+				// Add reference without data
+				attachments = append(attachments, channel.Attachment{
+					Type: channel.AttachmentFile,
+					URL:  quote.File.URL,
+					Name: fileName,
+					Mime: getMimeTypeFromFileName(fileName),
+					Metadata: map[string]any{
+						"aeskey": quote.File.AESKey,
+						"source": "quote",
+					},
+				})
+				textParts = append(textParts, "[引用文件: "+fileName+" (无法下载)]")
+			} else {
+				// Use filename from Content-Disposition if available
+				if result.FileName != "" {
+					fileName = result.FileName
+				}
+				attachments = append(attachments, channel.Attachment{
+					Type:     channel.AttachmentFile,
+					URL:      quote.File.URL,
+					Name:     fileName,
+					Mime:     getMimeTypeFromFileName(fileName),
+					Data:     result.Data,
+					Metadata: map[string]any{
+						"aeskey": quote.File.AESKey,
+						"size":   len(result.Data),
+						"source": "quote",
+					},
+				})
+				textParts = append(textParts, "[引用文件: "+fileName+"]")
+			}
+		}
+
+	case MsgTypeVoice:
+		if quote.Voice != nil {
+			a.logger.Info("processing quote voice",
+				slog.String("req_id", reqID))
+			// Voice messages in WeCom are transcribed to text
+			// The VoiceContent only contains the transcribed text, no audio URL
+			if quote.Voice.Content != "" {
+				textParts = append(textParts, "[引用语音转文字] "+quote.Voice.Content)
+			} else {
+				textParts = append(textParts, "[引用语音]")
+			}
+		}
+
+	case MsgTypeMixed:
+		if quote.Mixed != nil {
+			a.logger.Info("processing quote mixed content",
+				slog.String("req_id", reqID),
+				slog.Int("item_count", len(quote.Mixed.MsgItem)))
+
+			var mixedParts []string
+			for i, item := range quote.Mixed.MsgItem {
+				switch item.MsgType {
+				case MsgTypeText:
+					if item.Text != nil && item.Text.Content != "" {
+						mixedParts = append(mixedParts, item.Text.Content)
+					}
+				case MsgTypeImage:
+					if item.Image != nil {
+						result, err := a.downloadAndDecrypt(item.Image.URL, item.Image.AESKey)
+						if err != nil {
+							a.logger.Error("failed to download/decrypt quote mixed image",
+								slog.String("req_id", reqID),
+								slog.Int("item_index", i),
+								slog.Any("error", err))
+							attachments = append(attachments, channel.Attachment{
+								Type: channel.AttachmentImage,
+								URL:  item.Image.URL,
+								Metadata: map[string]any{
+									"aeskey": item.Image.AESKey,
+									"source": "quote_mixed",
+									"index":  i,
+								},
+							})
+							mixedParts = append(mixedParts, "[图片]")
+						} else {
+							attachments = append(attachments, channel.Attachment{
+								Type: channel.AttachmentImage,
+								URL:  item.Image.URL,
+								Data: result.Data,
+								Metadata: map[string]any{
+									"aeskey": item.Image.AESKey,
+									"size":   len(result.Data),
+									"source": "quote_mixed",
+									"index":  i,
+								},
+							})
+							mixedParts = append(mixedParts, "[图片]")
+						}
+					}
+				}
+			}
+
+			if len(mixedParts) > 0 {
+				textParts = append(textParts, "[引用图文] "+strings.Join(mixedParts, " "))
+			}
+		}
+
+	default:
+		a.logger.Warn("unknown quote message type",
+			slog.String("quote_type", quote.MsgType),
+			slog.String("req_id", reqID))
+		textParts = append(textParts, "[引用消息 (未知类型)]")
+	}
+
+	return strings.Join(textParts, "\n"), attachments
+}
+
 // handleWebSocketMessage handles incoming WebSocket messages
 func (a *Adapter) handleWebSocketMessage(ctx context.Context, cfg channel.ChannelConfig, config *Config, handler channel.InboundHandler, wsMsg *WebsocketMessage) error {
 	a.logger.Info("handleWebSocketMessage called",
@@ -594,6 +786,22 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 
 	// Get WebSocket client for sending replies
 	wsClient := a.getWebSocketClient(cfg.BotID)
+
+	// Process quote message if present
+	var quoteText string
+	var quoteAttachments []channel.Attachment
+	if body.Quote != nil {
+		a.logger.Info("message contains quote",
+			slog.String("quote_type", body.Quote.MsgType),
+			slog.String("req_id", wsMsg.Headers.ReqID))
+		quoteText, quoteAttachments = a.processQuoteContent(ctx, body.Quote, wsMsg.Headers.ReqID)
+		if quoteText != "" {
+			a.logger.Info("quote content extracted",
+				slog.String("quote_text_preview", truncateString(quoteText, 100)),
+				slog.Int("quote_attachments", len(quoteAttachments)),
+				slog.String("req_id", wsMsg.Headers.ReqID))
+		}
+	}
 
 	// Get content preview based on message type
 	contentPreview := ""
@@ -731,8 +939,26 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 				return a.handleNewChatCommand(ctx, cfg, wsMsg, body)
 			}
 
-			msg.Message.Text = content
+			// Add quote content if present
+			finalContent := content
+			if quoteText != "" {
+				finalContent = quoteText + "\n\n---\n" + content
+				a.logger.Info("quote content prepended to message",
+					slog.String("quote_text_preview", truncateString(quoteText, 50)),
+					slog.String("final_content_preview", truncateString(finalContent, 100)),
+					slog.String("req_id", wsMsg.Headers.ReqID))
+			}
+			msg.Message.Text = finalContent
 			msg.Message.Format = channel.MessageFormatPlain
+
+			// Add quote attachments if present
+			if len(quoteAttachments) > 0 {
+				msg.Message.Attachments = append(msg.Message.Attachments, quoteAttachments...)
+				a.logger.Info("quote attachments added to message",
+					slog.Int("quote_attachment_count", len(quoteAttachments)),
+					slog.Int("total_attachment_count", len(msg.Message.Attachments)),
+					slog.String("req_id", wsMsg.Headers.ReqID))
+			}
 
 			// Add is_mentioned metadata for group chats
 			if body.ChatType == "group" {
@@ -807,9 +1033,22 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 					},
 				})
 			}
-			// Set a default text for pure image messages so buildInboundQuery doesn't return empty
-			msg.Message.Text = "[用户发送了一张图片]"
+			// Add quote content if present
+			imageText := "[用户发送了一张图片]"
+			if quoteText != "" {
+				imageText = quoteText + "\n\n---\n" + imageText
+			}
+			msg.Message.Text = imageText
 			msg.Message.Format = channel.MessageFormatPlain
+
+			// Add quote attachments if present
+			if len(quoteAttachments) > 0 {
+				msg.Message.Attachments = append(msg.Message.Attachments, quoteAttachments...)
+				a.logger.Info("quote attachments added to image message",
+					slog.Int("quote_attachment_count", len(quoteAttachments)),
+					slog.String("req_id", wsMsg.Headers.ReqID))
+			}
+
 			// Send immediate "thinking" reply for better UX
 			// CRITICAL: Generate streamID here and pass to both thinking reply and handler
 			streamID := generateStreamID()
@@ -888,8 +1127,21 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			if displayName == "" {
 				displayName = "未知文件"
 			}
-			msg.Message.Text = "[用户发送了一个文件: " + displayName + "]"
+			fileText := "[用户发送了一个文件: " + displayName + "]"
+			if quoteText != "" {
+				fileText = quoteText + "\n\n---\n" + fileText
+			}
+			msg.Message.Text = fileText
 			msg.Message.Format = channel.MessageFormatPlain
+
+			// Add quote attachments if present
+			if len(quoteAttachments) > 0 {
+				msg.Message.Attachments = append(msg.Message.Attachments, quoteAttachments...)
+				a.logger.Info("quote attachments added to file message",
+					slog.Int("quote_attachment_count", len(quoteAttachments)),
+					slog.String("req_id", wsMsg.Headers.ReqID))
+			}
+
 			// Send immediate "thinking" reply for better UX
 			// CRITICAL: Generate streamID here and pass to both thinking reply and handler
 			streamID := generateStreamID()
@@ -916,8 +1168,21 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			}
 
 			// Voice content is the transcribed text from WeCom
-			msg.Message.Text = body.Voice.Content
+			voiceText := "[语音] " + body.Voice.Content
+			if quoteText != "" {
+				voiceText = quoteText + "\n\n---\n" + voiceText
+			}
+			msg.Message.Text = voiceText
 			msg.Message.Format = channel.MessageFormatPlain
+
+			// Add quote attachments if present
+			if len(quoteAttachments) > 0 {
+				msg.Message.Attachments = append(msg.Message.Attachments, quoteAttachments...)
+				a.logger.Info("quote attachments added to voice message",
+					slog.Int("quote_attachment_count", len(quoteAttachments)),
+					slog.String("req_id", wsMsg.Headers.ReqID))
+			}
+
 			// Send immediate "thinking" reply for better UX
 			// CRITICAL: Generate streamID here and pass to both thinking reply and handler
 			streamID := generateStreamID()
@@ -935,7 +1200,7 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 
 	case MsgTypeMixed:
 		if body.Mixed != nil {
-			return a.handleMixedContent(ctx, cfg, config, handler, wsMsg.Headers.ReqID, body)
+			return a.handleMixedContent(ctx, cfg, config, handler, wsMsg.Headers.ReqID, body, quoteText, quoteAttachments)
 		}
 
 	default:
@@ -1043,7 +1308,7 @@ func (a *Adapter) handleEventCallback(ctx context.Context, cfg channel.ChannelCo
 }
 
 // handleMixedContent handles mixed content (text + image) messages
-func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelConfig, config *Config, handler channel.InboundHandler, reqID string, body MsgCallbackBody) error {
+func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelConfig, config *Config, handler channel.InboundHandler, reqID string, body MsgCallbackBody, quoteText string, quoteAttachments []channel.Attachment) error {
 	replyTarget := ""
 	if body.ChatType == "group" {
 		replyTarget = "chat_id:" + body.ChatID
@@ -1142,6 +1407,25 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 		content = config.ExtractGroupMessageContent(content)
 	}
 
+	// Add quote content if present
+	finalContent := content
+	if quoteText != "" {
+		finalContent = quoteText + "\n\n---\n" + content
+		a.logger.Info("quote content prepended to mixed message",
+			slog.String("quote_text_preview", truncateString(quoteText, 50)),
+			slog.String("final_content_preview", truncateString(finalContent, 100)),
+			slog.String("req_id", reqID))
+	}
+
+	// Add quote attachments if present
+	if len(quoteAttachments) > 0 {
+		attachments = append(attachments, quoteAttachments...)
+		a.logger.Info("quote attachments added to mixed message",
+			slog.Int("quote_attachment_count", len(quoteAttachments)),
+			slog.Int("total_attachment_count", len(attachments)),
+			slog.String("req_id", reqID))
+	}
+
 	msg := channel.InboundMessage{
 		Channel: Type,
 		BotID:   cfg.BotID,
@@ -1159,7 +1443,7 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 		ReplyTarget: replyTarget,
 		Message: channel.Message{
 			ID:          body.MsgID,
-			Text:        content,
+			Text:        finalContent,
 			Format:      channel.MessageFormatPlain,
 			Attachments: attachments,
 			Metadata: map[string]any{

@@ -110,12 +110,75 @@ func (s *ToolGatewayService) CallTool(ctx context.Context, session ToolSessionCo
 		if errors.Is(err, ErrToolNotFound) {
 			return BuildToolErrorResult("tool not found: " + toolName), nil
 		}
+		// If built-in executor is not capable (e.g., bot has no image model),
+		// try fallback to federation sources
+		if errors.Is(err, ErrToolNotCapable) {
+			s.logger.Info("tool not capable from built-in, trying federation fallback",
+				slog.String("tool", toolName),
+				slog.String("bot_id", session.BotID),
+				slog.Int("source_count", len(s.sources)))
+			fallbackResult, fallbackErr := s.tryFederationFallback(ctx, session, toolName, arguments)
+			if fallbackErr == nil && fallbackResult != nil {
+				s.logger.Info("federation fallback succeeded",
+					slog.String("tool", toolName))
+				return fallbackResult, nil
+			}
+			s.logger.Warn("federation fallback failed",
+				slog.String("tool", toolName),
+				slog.Any("error", fallbackErr))
+		}
 		return BuildToolErrorResult(err.Error()), nil
 	}
 	if result == nil {
 		return BuildToolSuccessResult(map[string]any{"ok": true}), nil
 	}
 	return result, nil
+}
+
+// tryFederationFallback attempts to find and call a matching tool from federation sources
+// when built-in executor returns ErrToolNotCapable. It looks for tools with similar names.
+func (s *ToolGatewayService) tryFederationFallback(ctx context.Context, session ToolSessionContext, originalToolName string, arguments map[string]any) (map[string]any, error) {
+	// Try to find matching tools from federation sources
+	// Look for tools with names containing "image" and "generate" (in any order)
+	for _, source := range s.sources {
+		tools, err := source.ListTools(ctx, session)
+		if err != nil {
+			s.logger.Warn("failed to list tools from source for fallback",
+				slog.Any("error", err))
+			continue
+		}
+			// Collect all tool names for debugging
+		var toolNames []string
+		for _, tool := range tools {
+			toolNames = append(toolNames, tool.Name)
+		}
+		s.logger.Info("trying federation source for fallback",
+			slog.String("source", fmt.Sprintf("%T", source)),
+			slog.Int("tool_count", len(tools)),
+			slog.Any("tools", toolNames))
+
+		for _, tool := range tools {
+			toolName := strings.ToLower(tool.Name)
+			// Look for tools matching common image generation patterns
+			// Support patterns like: z-image.generate_image_tool, generate_image, image_generate, etc.
+			hasGenerate := strings.Contains(toolName, "generate") || strings.Contains(toolName, "gen")
+			hasImage := strings.Contains(toolName, "image") || strings.Contains(toolName, "img") || strings.Contains(toolName, "picture") || strings.Contains(toolName, "draw")
+
+			s.logger.Info("checking tool for fallback match",
+				slog.String("tool", tool.Name),
+				slog.String("toolName_lower", toolName),
+				slog.Bool("hasGenerate", hasGenerate),
+				slog.Bool("hasImage", hasImage))
+
+			if hasGenerate && hasImage {
+				s.logger.Info("found federation fallback tool",
+					slog.String("original", originalToolName),
+					slog.String("fallback", tool.Name))
+				return source.CallTool(ctx, session, tool.Name, arguments)
+			}
+		}
+	}
+	return nil, fmt.Errorf("no suitable federation fallback found for %s", originalToolName)
 }
 
 func (s *ToolGatewayService) getRegistry(ctx context.Context, session ToolSessionContext, force bool) (*ToolRegistry, error) {

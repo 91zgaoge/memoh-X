@@ -28,7 +28,7 @@ func NewMCPFederationGateway(log *slog.Logger, handler *ContainerdHandler) *MCPF
 		handler: handler,
 		logger:  log.With(slog.String("gateway", "mcp_federation")),
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 3600 * time.Second, // 1 hour timeout for long-running operations like image generation
 		},
 	}
 }
@@ -189,7 +189,7 @@ func resolveSSEEndpointCandidates(config map[string]any) []string {
 func (g *MCPFederationGateway) connectionHTTPClient(connection mcpgw.Connection) *http.Client {
 	base := g.client
 	if base == nil {
-		base = &http.Client{Timeout: 30 * time.Second}
+		base = &http.Client{Timeout: 3600 * time.Second}
 	}
 	headers := normalizeHeaderMap(connection.Config["headers"])
 	if len(headers) == 0 {

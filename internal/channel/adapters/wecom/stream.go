@@ -2,6 +2,9 @@ package wecom
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -50,6 +53,9 @@ type OutboundStream struct {
 	// Reasoning phase throttling
 	lastThinkingSendTime time.Time     // 上次思考阶段发送时间
 	thinkingSendInterval time.Duration // 思考阶段发送间隔
+
+	// Attachments to be sent with final message (via msg_item)
+	attachments []channel.Attachment
 }
 
 // StreamTimeout 流式消息超时时间（6分钟）
@@ -273,6 +279,15 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			close(s.stopTicker)
 		})
 
+		// Capture attachments from final message for msg_item sending
+		if event.Final != nil && len(event.Final.Message.Attachments) > 0 {
+			s.mu.Lock()
+			s.attachments = event.Final.Message.Attachments
+			s.mu.Unlock()
+			s.logger.Info("captured attachments for final message",
+				slog.Int("attachment_count", len(event.Final.Message.Attachments)))
+		}
+
 		var finalContent string
 		if event.Final != nil && event.Final.Message.Text != "" {
 			// CRITICAL: Strip think tags from final content as well
@@ -394,7 +409,8 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 
 // sendFullContent sends the full content to WeCom
 // Following SDK specification: always send complete content, not delta
-// If content exceeds MaxContentBytes, it will be sent using segmented sending
+// If content exceeds MaxContentBytes, it will be sent using segmented sending.
+// When finish=true and attachments are present, they will be sent as msg_item (up to 10 images).
 func (s *OutboundStream) sendFullContent(ctx context.Context, content string, finish bool) error {
 	// CRITICAL: Never send empty content for intermediate updates
 	if content == "" && !finish {
@@ -486,12 +502,27 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 	}
 
 	// Send stream update using WeCom stream format
+	// Build msg_item for attachments when finish=true (SDK限制：msg_item仅在finish=true时有效)
+	var msgItems []ReplyMsgItem
+	if finish {
+		s.mu.Lock()
+		attachments := s.attachments
+		s.mu.Unlock()
+		if len(attachments) > 0 {
+			msgItems = s.buildMsgItemsFromAttachments(attachments)
+			s.logger.Info("building msg_item for attachments",
+				slog.Int("attachment_count", len(attachments)),
+				slog.Int("msg_item_count", len(msgItems)))
+		}
+	}
+
 	body := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
-			ID:      streamID,
-			Finish:  finish,
-			Content: truncatedContent, // Send FULL content, not delta
+			ID:       streamID,
+			Finish:   finish,
+			Content:  truncatedContent, // Send FULL content, not delta
+			MsgItem:  msgItems,         // 仅在finish=true时有效，最多10个图片
 		},
 	}
 
@@ -1025,4 +1056,82 @@ func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content stri
 		slog.Int("content_bytes", len([]byte(content))))
 
 	return wsClient.SendReply(ctx, reqID, body, CmdSendMsg)
+}
+
+// ========== msg_item 图片发送支持 ==========
+
+// buildMsgItemsFromAttachments 将附件转换为 ReplyMsgItem 列表
+// SDK限制：最多10个图片，每个图片base64编码前最大10M，支持JPG、PNG格式
+func (s *OutboundStream) buildMsgItemsFromAttachments(attachments []channel.Attachment) []ReplyMsgItem {
+	var msgItems []ReplyMsgItem
+	const maxImages = 10           // SDK限制：最多10个图片
+	const maxImageSize = 10 * 1024 * 1024 // 10MB limit before base64 encoding
+
+	for i, att := range attachments {
+		// 只处理图片类型附件
+		if att.Type != channel.AttachmentImage {
+			s.logger.Debug("skipping non-image attachment for msg_item",
+				slog.String("type", string(att.Type)),
+				slog.String("name", att.Name))
+			continue
+		}
+
+		// 限制最多10个图片
+		if len(msgItems) >= maxImages {
+			s.logger.Warn("too many image attachments, truncating to 10",
+				slog.Int("total", len(attachments)))
+			break
+		}
+
+		// 获取图片数据
+		imageData := att.Data
+		if len(imageData) == 0 {
+			s.logger.Warn("image attachment has no data, skipping",
+				slog.String("name", att.Name),
+				slog.Int("index", i))
+			continue
+		}
+
+		// 检查图片大小限制（base64编码前）
+		if len(imageData) > maxImageSize {
+			s.logger.Warn("image too large, skipping",
+				slog.String("name", att.Name),
+				slog.Int("size", len(imageData)),
+				slog.Int("max_size", maxImageSize))
+			continue
+		}
+
+		// 转换为Base64
+		base64Data := base64.StdEncoding.EncodeToString(imageData)
+
+		// 计算MD5
+		md5Hash := calculateMD5(imageData)
+
+		// 创建ReplyMsgItem
+		msgItem := ReplyMsgItem{
+			MsgType: MsgTypeImage,
+			Image: struct {
+				Base64 string `json:"base64"`
+				MD5    string `json:"md5"`
+			}{
+				Base64: base64Data,
+				MD5:    md5Hash,
+			},
+		}
+		msgItems = append(msgItems, msgItem)
+
+		s.logger.Info("added image to msg_item",
+			slog.String("name", att.Name),
+			slog.Int("index", i),
+			slog.Int("data_size", len(imageData)),
+			slog.Int("base64_size", len(base64Data)))
+	}
+
+	return msgItems
+}
+
+// calculateMD5 计算数据的MD5哈希值（小写十六进制）
+func calculateMD5(data []byte) string {
+	hash := md5.Sum(data)
+	return hex.EncodeToString(hash[:])
 }

@@ -19,9 +19,19 @@ This skill enables natural language querying of structured databases through Wre
 
 ## Environment Variables
 
-- `WRENAI_PG_URL` - WrenAI PostgreSQL instance URL (default: http://localhost:5555)
-- `WRENAI_MSSQL_URL` - WrenAI MSSQL instance URL (default: http://localhost:6555)
-- `WRENAI_HR_URL` - WrenAI HR instance URL (default: http://localhost:7555)
+- `WRENAI_PG_URL` - WrenAI PostgreSQL instance URL (default: auto-detect)
+- `WRENAI_MSSQL_URL` - WrenAI MSSQL instance URL (default: auto-detect)
+- `WRENAI_HR_URL` - WrenAI HR instance URL (default: auto-detect)
+- `WRENAI_HOST` - WrenAI host IP (optional, auto-detect if not set)
+
+**Network Configuration:**
+The script automatically detects the correct WrenAI host address by trying:
+1. `10.62.239.13` (host IP - works from both host and containers)
+2. `172.17.0.1` (Docker gateway)
+3. `host.docker.internal` (Docker Desktop)
+4. `localhost` (fallback)
+
+To manually specify the host, set `WRENAI_HOST` environment variable.
 
 ## When to Use This Skill
 
@@ -69,6 +79,9 @@ Use the wrenai-query skill when you need to:
 ```bash
 bash "$SKILLS_ROOT/wrenai-query/scripts/query.sh" "your natural language question" [instance]
 ```
+
+**Python Fallback:**
+The script automatically detects if `jq` is available. If not, it falls back to a pure Python implementation (`query.py`) that requires no external dependencies beyond Python 3 standard library.
 
 **Instances:**
 - `pg` or `postgresql` - PostgreSQL instance (default)

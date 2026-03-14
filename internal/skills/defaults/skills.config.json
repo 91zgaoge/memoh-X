@@ -89,6 +89,10 @@
     "rag-documents": {
       "order": 310,
       "enabled": true
+    },
+    "wrenai-query": {
+      "order": 320,
+      "enabled": true
     }
   }
 }

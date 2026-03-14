@@ -103,6 +103,10 @@ func (s *Source) CallTool(ctx context.Context, session mcpgw.ToolSessionContext,
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
+	// 自动注入 bot_id 参数，供 MCP 工具使用（如 z-image 保存图片到正确的目录）
+	if _, exists := arguments["bot_id"]; !exists {
+		arguments["bot_id"] = botID
+	}
 
 	var (
 		payload map[string]any
