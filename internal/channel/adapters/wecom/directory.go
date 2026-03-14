@@ -155,15 +155,109 @@ func (a *Adapter) ListPeers(ctx context.Context, cfg channel.ChannelConfig, quer
 	return entries, nil
 }
 
-// ListGroups returns empty list as WeCom doesn't expose group chats via API
+// ListGroups returns cached group chats that the bot has received messages from.
+// Since WeCom AI Bot SDK doesn't provide an API to list group chats,
+// groups are discovered passively when messages are received.
 func (a *Adapter) ListGroups(ctx context.Context, cfg channel.ChannelConfig, query channel.DirectoryQuery) ([]channel.DirectoryEntry, error) {
-	// WeCom doesn't provide API to list group chats
-	return []channel.DirectoryEntry{}, nil
+	a.groupMemberCacheMu.RLock()
+	defer a.groupMemberCacheMu.RUnlock()
+
+	entries := make([]channel.DirectoryEntry, 0, len(a.groupMemberCache))
+	queryStr := strings.ToLower(strings.TrimSpace(query.Query))
+
+	for chatID, group := range a.groupMemberCache {
+		name := group.Name
+		displayName := name
+		if displayName == "" {
+			displayName = fmt.Sprintf("群聊 %s", chatID[:8]) // Show first 8 chars of chatID
+		}
+
+		entry := channel.DirectoryEntry{
+			Kind: channel.DirectoryEntryGroup,
+			ID:   fmt.Sprintf("chat_id:%s", chatID),
+			Name: displayName,
+			Handle: chatID,
+			Metadata: map[string]any{
+				"chat_id":      chatID,
+				"custom_name":  name != "",
+				"member_count": group.MemberCount,
+				"first_seen":   group.FirstSeen,
+				"last_active":  group.LastActive,
+			},
+		}
+
+		// Apply query filter if provided
+		if queryStr != "" {
+			searchText := strings.ToLower(entry.Name + entry.Handle + entry.ID)
+			if !strings.Contains(searchText, queryStr) {
+				continue
+			}
+		}
+
+		entries = append(entries, entry)
+
+		// Respect limit
+		if query.Limit > 0 && len(entries) >= query.Limit {
+			break
+		}
+	}
+
+	return entries, nil
 }
 
-// ListGroupMembers returns error as WeCom doesn't support this operation
+// ListGroupMembers returns group members from the passive cache.
+// Since WeCom AI Bot SDK doesn't provide an API to fetch group members,
+// members are collected passively when they send messages in the group.
 func (a *Adapter) ListGroupMembers(ctx context.Context, cfg channel.ChannelConfig, groupID string, query channel.DirectoryQuery) ([]channel.DirectoryEntry, error) {
-	return nil, fmt.Errorf("wecom does not support listing group members via API")
+	// Parse groupID - support "chat_id:xxx" format or plain chat ID
+	chatID := strings.TrimSpace(groupID)
+	if strings.HasPrefix(strings.ToLower(chatID), "chat_id:") {
+		chatID = strings.TrimSpace(chatID[8:])
+	}
+
+	// Get group info from cache
+	a.groupMemberCacheMu.RLock()
+	group, exists := a.groupMemberCache[chatID]
+	a.groupMemberCacheMu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("group %s not found in cache. The bot needs to receive at least one message in the group before member list is available", groupID)
+	}
+
+	// Convert cached members to DirectoryEntry
+	entries := make([]channel.DirectoryEntry, 0, len(group.Members))
+	queryStr := strings.ToLower(strings.TrimSpace(query.Query))
+
+	for _, member := range group.Members {
+		entry := channel.DirectoryEntry{
+			Kind:   channel.DirectoryEntryUser,
+			ID:     fmt.Sprintf("userid:%s", member.UserID),
+			Name:   member.Name,
+			Handle: member.UserID,
+			Metadata: map[string]any{
+				"first_seen": member.FirstSeen,
+				"last_seen":  member.LastSeen,
+				"msg_count":  member.MsgCount,
+			},
+		}
+
+		// Apply query filter if provided
+		if queryStr != "" {
+			searchText := strings.ToLower(entry.Name + entry.Handle + entry.ID)
+			if !strings.Contains(searchText, queryStr) {
+				continue
+			}
+		}
+
+		entries = append(entries, entry)
+
+		// Respect limit
+		if query.Limit > 0 && len(entries) >= query.Limit {
+			break
+		}
+	}
+
+	return entries, nil
 }
 
 // ResolveEntry resolves a user by userid or name

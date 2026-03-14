@@ -41,6 +41,27 @@ func isNewChatCommand(content string) bool {
 	return false
 }
 
+// GroupMemberCache stores information about a group chat member
+// This is used for passive member collection since WeCom AI Bot SDK
+// does not provide an API to fetch group member lists directly.
+type GroupMemberCache struct {
+	UserID    string    // User ID
+	Name      string    // User name (if available)
+	FirstSeen time.Time // First time this member was seen in the group
+	LastSeen  time.Time // Last time this member sent a message
+	MsgCount  int       // Number of messages sent by this member
+}
+
+// GroupInfo stores information about a group chat and its members
+type GroupInfo struct {
+	ChatID      string                        // Group chat ID
+	Name        string                        // Group chat name (manual set, since SDK doesn't provide it)
+	FirstSeen   time.Time                     // First time this group was discovered
+	LastActive  time.Time                     // Last time there was activity in this group
+	Members     map[string]*GroupMemberCache  // Members map: user_id -> member info
+	MemberCount int                           // Total member count
+}
+
 // Adapter implements the WeCom channel adapter
 type Adapter struct {
 	logger         *slog.Logger
@@ -63,6 +84,10 @@ type Adapter struct {
 	// Group chat cache: chat_name -> chat_id
 	groupCache   map[string]string // chat_name -> chat_id
 	groupCacheMu sync.RWMutex
+
+	// Group member cache: chat_id -> GroupInfo (被动收集群聊成员)
+	groupMemberCache   map[string]*GroupInfo
+	groupMemberCacheMu sync.RWMutex
 }
 
 // NewWeComAdapter creates a new WeCom adapter (alias for NewAdapter for compatibility)
@@ -94,6 +119,8 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 		dedupManager: NewDedupManager(),
 		// 初始化群聊缓存
 		groupCache: make(map[string]string),
+		// 初始化群聊成员缓存（被动收集）
+		groupMemberCache: make(map[string]*GroupInfo),
 	}
 }
 
@@ -836,6 +863,9 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 		a.groupCacheMu.Unlock()
 		a.logger.Debug("[GROUP_CACHE] cached group chat",
 			slog.String("chat_id", body.ChatID))
+
+		// 被动收集群聊成员信息
+		a.updateGroupMemberCache(body.ChatID, body.From.UserID, body.From.Name)
 	} else {
 		replyTarget = "user_id:" + body.From.UserID
 	}
@@ -1208,6 +1238,184 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 	}
 
 	return nil
+}
+
+// updateGroupMemberCache updates the group member cache when a message is received in a group chat.
+// This is a passive collection mechanism since WeCom AI Bot SDK does not provide an API
+// to fetch group member lists directly.
+func (a *Adapter) updateGroupMemberCache(chatID, userID, userName string) {
+	a.groupMemberCacheMu.Lock()
+	defer a.groupMemberCacheMu.Unlock()
+
+	if a.groupMemberCache == nil {
+		a.groupMemberCache = make(map[string]*GroupInfo)
+	}
+
+	group, exists := a.groupMemberCache[chatID]
+	if !exists {
+		group = &GroupInfo{
+			ChatID:    chatID,
+			FirstSeen: time.Now(),
+			Members:   make(map[string]*GroupMemberCache),
+		}
+		a.groupMemberCache[chatID] = group
+		a.logger.Info("[GROUP_MEMBER_CACHE] new group discovered",
+			slog.String("chat_id", chatID))
+	}
+
+	// Update group activity
+	group.LastActive = time.Now()
+
+	// Update or add member
+	member, exists := group.Members[userID]
+	if !exists {
+		member = &GroupMemberCache{
+			UserID:    userID,
+			Name:      userName,
+			FirstSeen: time.Now(),
+		}
+		group.Members[userID] = member
+		group.MemberCount = len(group.Members)
+		a.logger.Info("[GROUP_MEMBER_CACHE] new member discovered",
+			slog.String("chat_id", chatID),
+			slog.String("user_id", userID),
+			slog.String("user_name", userName),
+			slog.Int("total_members", group.MemberCount))
+	}
+
+	member.LastSeen = time.Now()
+	member.MsgCount++
+}
+
+// GetGroupInfo returns cached group info if available
+func (a *Adapter) GetGroupInfo(chatID string) (*GroupInfo, bool) {
+	a.groupMemberCacheMu.RLock()
+	defer a.groupMemberCacheMu.RUnlock()
+
+	group, exists := a.groupMemberCache[chatID]
+	if !exists {
+		return nil, false
+	}
+
+	// Return a copy to avoid external modification
+	return &GroupInfo{
+		ChatID:      group.ChatID,
+		Name:        group.Name,
+		FirstSeen:   group.FirstSeen,
+		LastActive:  group.LastActive,
+		MemberCount: group.MemberCount,
+		// Note: Members map is not copied for simplicity; add method if needed
+	}, true
+}
+
+// ListCachedGroups returns a list of all cached group chat IDs
+func (a *Adapter) ListCachedGroups() []string {
+	a.groupMemberCacheMu.RLock()
+	defer a.groupMemberCacheMu.RUnlock()
+
+	groups := make([]string, 0, len(a.groupMemberCache))
+	for chatID := range a.groupMemberCache {
+		groups = append(groups, chatID)
+	}
+	return groups
+}
+
+// GroupSummary represents a summary of cached group info for listing
+type GroupSummary struct {
+	ChatID      string    `json:"chat_id"`
+	Name        string    `json:"name"`
+	MemberCount int       `json:"member_count"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastActive  time.Time `json:"last_active"`
+}
+
+// ListCachedGroupDetails returns detailed info for all cached groups
+func (a *Adapter) ListCachedGroupDetails() []GroupSummary {
+	a.groupMemberCacheMu.RLock()
+	defer a.groupMemberCacheMu.RUnlock()
+
+	groups := make([]GroupSummary, 0, len(a.groupMemberCache))
+	for chatID, group := range a.groupMemberCache {
+		name := group.Name
+		if name == "" {
+			name = chatID // Use chatID as name if not set
+		}
+		groups = append(groups, GroupSummary{
+			ChatID:      chatID,
+			Name:        name,
+			MemberCount: group.MemberCount,
+			FirstSeen:   group.FirstSeen,
+			LastActive:  group.LastActive,
+		})
+	}
+	return groups
+}
+
+// SetGroupName sets a friendly name for a cached group chat
+func (a *Adapter) SetGroupName(chatID, name string) error {
+	a.groupMemberCacheMu.Lock()
+	defer a.groupMemberCacheMu.Unlock()
+
+	group, exists := a.groupMemberCache[chatID]
+	if !exists {
+		return fmt.Errorf("group %s not found in cache", chatID)
+	}
+
+	group.Name = name
+	a.logger.Info("[GROUP_CACHE] group name updated",
+		slog.String("chat_id", chatID),
+		slog.String("name", name))
+	return nil
+}
+
+// GetGroupByName finds a group by its friendly name
+func (a *Adapter) GetGroupByName(name string) (*GroupInfo, bool) {
+	a.groupMemberCacheMu.RLock()
+	defer a.groupMemberCacheMu.RUnlock()
+
+	for _, group := range a.groupMemberCache {
+		if group.Name == name {
+			return &GroupInfo{
+				ChatID:      group.ChatID,
+				Name:        group.Name,
+				FirstSeen:   group.FirstSeen,
+				LastActive:  group.LastActive,
+				MemberCount: group.MemberCount,
+			}, true
+		}
+	}
+	return nil, false
+}
+
+// GroupCacheStats returns statistics about the group cache
+func (a *Adapter) GroupCacheStats() map[string]any {
+	a.groupMemberCacheMu.RLock()
+	defer a.groupMemberCacheMu.RUnlock()
+
+	totalGroups := len(a.groupMemberCache)
+	totalMembers := 0
+	namedGroups := 0
+
+	for _, group := range a.groupMemberCache {
+		totalMembers += group.MemberCount
+		if group.Name != "" {
+			namedGroups++
+		}
+	}
+
+	return map[string]any{
+		"total_groups":   totalGroups,
+		"named_groups":   namedGroups,
+		"total_members":  totalMembers,
+		"avg_members":    float64(totalMembers) / float64(max(1, totalGroups)),
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // handleNewChatCommand handles the "new chat" command to clear conversation history

@@ -224,8 +224,12 @@ func ParseConfig(raw map[string]any) (*Config, error) {
 	if groupEnabled, ok := raw["group_chat_enabled"].(bool); ok {
 		cfg.GroupChatEnabled = groupEnabled
 	}
+	// Support both "require_mention" (legacy) and "group_require_mention" (unified with other channels)
 	if requireMention, ok := raw["require_mention"].(bool); ok {
 		cfg.RequireMention = requireMention
+	}
+	if groupRequireMention, ok := raw["group_require_mention"].(bool); ok {
+		cfg.RequireMention = groupRequireMention
 	}
 	if admins, ok := raw["admin_users"].([]any); ok {
 		cfg.AdminUsers = make([]string, 0, len(admins))
