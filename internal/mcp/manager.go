@@ -97,6 +97,12 @@ func (m *Manager) EnsureBot(ctx context.Context, botID string) error {
 		return err
 	}
 
+	// Ensure OpenViking data directory exists for this bot
+	ovDataDir, err := m.ensureOVDataDir(botID)
+	if err != nil {
+		return err
+	}
+
 	dataMount := m.dataMount()
 	image := m.imageRef()
 	resolvPath, err := ctr.ResolveConfSource(dataDir)
@@ -110,6 +116,12 @@ func (m *Manager) EnsureBot(ctx context.Context, botID string) error {
 				Destination: dataMount,
 				Type:        "bind",
 				Source:      dataDir,
+				Options:     []string{"rbind", "rw"},
+			},
+			{
+				Destination: "/app/openviking-data",
+				Type:        "bind",
+				Source:      ovDataDir,
 				Options:     []string{"rbind", "rw"},
 			},
 			{
@@ -399,6 +411,16 @@ func (m *Manager) DataDir(botID string) (string, error) {
 
 func (m *Manager) ensureBotDir(botID string) (string, error) {
 	dir := filepath.Join(m.dataRoot(), "bots", botID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// ensureOVDataDir creates and returns the OpenViking data directory for a bot.
+// This directory is mounted to /app/openviking-data in the container.
+func (m *Manager) ensureOVDataDir(botID string) (string, error) {
+	dir := filepath.Join(m.dataRoot(), "openviking", "bots", botID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
