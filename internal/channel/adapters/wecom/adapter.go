@@ -59,6 +59,10 @@ type Adapter struct {
 
 	// Token cache for contacts API
 	tokenCache *tokenCache
+
+	// Group chat cache: chat_name -> chat_id
+	groupCache   map[string]string // chat_name -> chat_id
+	groupCacheMu sync.RWMutex
 }
 
 // NewWeComAdapter creates a new WeCom adapter (alias for NewAdapter for compatibility)
@@ -88,6 +92,8 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 		hourLimiter:   rate.NewLimiter(rate.Every(3600*time.Second/1000), 1), // 1000条/小时
 		// 初始化消息去重管理器
 		dedupManager: NewDedupManager(),
+		// 初始化群聊缓存
+		groupCache: make(map[string]string),
 	}
 }
 
@@ -185,10 +191,11 @@ func (a *Adapter) Descriptor() channel.Descriptor {
 			},
 		},
 		TargetSpec: channel.TargetSpec{
-			Format: "user_id:xxx | name:xxx",
+			Format: "user_id:xxx | name:xxx | chat_name:xxx",
 			Hints: []channel.TargetHint{
 				{Label: "User ID", Example: "user_id:USER_ID"},
 				{Label: "Name", Example: "name:用户名"},
+				{Label: "Chat Name", Example: "chat_name:群聊名称"},
 			},
 		},
 	}
@@ -486,6 +493,26 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 			}
 		}
 
+		// Handle chat_name:xxx format - lookup group by name from cache
+		if strings.HasPrefix(target, "chat_name:") {
+			chatName := strings.TrimPrefix(target, "chat_name:")
+			chatName = strings.TrimSpace(chatName)
+			if chatName != "" {
+				a.groupCacheMu.RLock()
+				chatID, found := a.groupCache[chatName]
+				a.groupCacheMu.RUnlock()
+				if !found {
+					a.logger.Error("[SEND] group not found in cache",
+						slog.String("chat_name", chatName))
+					return fmt.Errorf("group not found by name: %s (bot needs to be added to the group first)", chatName)
+				}
+				target = "chat_id:" + chatID
+				a.logger.Info("[SEND] resolved chat_name to chat_id",
+					slog.String("chat_name", chatName),
+					slog.String("chat_id", chatID))
+			}
+		}
+
 		if strings.HasPrefix(target, "user_id:") {
 			chatID = strings.TrimPrefix(target, "user_id:")
 			chatTypeInt = ChatTypeSingle // 1 = single chat
@@ -591,6 +618,16 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 	replyTarget := ""
 	if body.ChatType == "group" {
 		replyTarget = "chat_id:" + body.ChatID
+		// Cache group chat info for later lookup by name
+		a.groupCacheMu.Lock()
+		if a.groupCache == nil {
+			a.groupCache = make(map[string]string)
+		}
+		// Use chat_id as the key (user can later alias it via API if needed)
+		a.groupCache[body.ChatID] = body.ChatID
+		a.groupCacheMu.Unlock()
+		a.logger.Debug("[GROUP_CACHE] cached group chat",
+			slog.String("chat_id", body.ChatID))
 	} else {
 		replyTarget = "user_id:" + body.From.UserID
 	}

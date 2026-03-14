@@ -274,6 +274,35 @@ func (a *Adapter) fetchUserByID(token, userID string) (*wecomUser, error) {
 	return &result.wecomUser, nil
 }
 
+// RegisterGroupChat registers a group chat name to chat_id mapping
+// This allows sending messages to groups by name: target="chat_name:xxx"
+func (a *Adapter) RegisterGroupChat(name, chatID string) {
+	a.groupCacheMu.Lock()
+	defer a.groupCacheMu.Unlock()
+	if a.groupCache == nil {
+		a.groupCache = make(map[string]string)
+	}
+	a.groupCache[name] = chatID
+}
+
+// UnregisterGroupChat removes a group chat name mapping
+func (a *Adapter) UnregisterGroupChat(name string) {
+	a.groupCacheMu.Lock()
+	defer a.groupCacheMu.Unlock()
+	delete(a.groupCache, name)
+}
+
+// ListRegisteredGroupChats returns all registered group chat names and their chat_ids
+func (a *Adapter) ListRegisteredGroupChats() map[string]string {
+	a.groupCacheMu.RLock()
+	defer a.groupCacheMu.RUnlock()
+	result := make(map[string]string)
+	for k, v := range a.groupCache {
+		result[k] = v
+	}
+	return result
+}
+
 // wecomUserToEntry converts a WeCom user to DirectoryEntry
 func wecomUserToEntry(u *wecomUser) channel.DirectoryEntry {
 	meta := map[string]any{
