@@ -1152,6 +1152,9 @@ func buildFilters(req AddRequest) map[string]any {
 	if req.RunID != "" {
 		filters["run_id"] = req.RunID
 	}
+	if req.UserID != "" {
+		filters["user_id"] = req.UserID
+	}
 	return filters
 }
 
@@ -1168,6 +1171,9 @@ func buildSearchFilters(req SearchRequest) map[string]any {
 	}
 	if req.RunID != "" {
 		filters["run_id"] = req.RunID
+	}
+	if req.UserID != "" {
+		filters["user_id"] = req.UserID
 	}
 	return filters
 }

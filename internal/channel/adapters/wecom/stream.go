@@ -153,10 +153,21 @@ func (s *OutboundStream) flushBuffer() {
 		return
 	}
 
+	// Strip think tags from content before checking/sending
+	// This ensures no thinking content is ever sent to users
+	content = stripThinkTags(content)
+
+	// Check if content is empty after stripping think tags
+	if isEmptyContent(content) {
+		s.logger.Debug("skipping send after stripping think tags - content is empty",
+			slog.String("original_preview", truncateString(s.buffer.String(), 50)))
+		return
+	}
+
 	// Check if content contains think tags (reasoning phase)
 	// Apply shorter throttle interval during thinking phase to prevent SDK queue overflow
 	minInterval := MinSendInterval
-	if ContainsThinkTags(content) {
+	if ContainsThinkTags(s.buffer.String()) {
 		minInterval = s.thinkingSendInterval
 	}
 
@@ -735,9 +746,9 @@ func isContentInThinkTags(content string) bool {
 	return strings.HasPrefix(content, "<think>") && strings.HasSuffix(content, "</think>")
 }
 
-// stripThinkTags removes think tags from content and returns the inner content
+// stripThinkTags removes think tags AND their content from content
 // If no think tags are present, returns the original content
-// PRESERVES newlines and whitespace inside the content (only removes the tags themselves)
+// CRITICAL: This completely removes the thinking content, not just the tags
 // CRITICAL: Uses a loop to handle multiple think tag pairs
 func stripThinkTags(content string) string {
 	result := content
@@ -760,18 +771,9 @@ func stripThinkTags(content string) string {
 		}
 		thinkEnd += thinkStart + 8 // Adjust for offset and length of </think>
 
-		// Extract content between tags
-		innerStart := thinkStart + 7 // Length of <think>
-		innerEnd := thinkEnd - 8     // Length of </think>
-
-		if innerStart >= innerEnd {
-			// Empty or malformed tags - just remove the tags
-			result = result[:thinkStart] + result[thinkEnd:]
-		} else {
-			innerContent := result[innerStart:innerEnd]
-			// Return: before <think> + inner content + after </think>
-			result = result[:thinkStart] + innerContent + result[thinkEnd:]
-		}
+		// CRITICAL: Remove the ENTIRE think block including its content
+		// This prevents any thinking content from being sent to users
+		result = result[:thinkStart] + result[thinkEnd:]
 	}
 
 	return result

@@ -38,6 +38,7 @@ type AddRequest struct {
 	BotID            string         `json:"bot_id,omitempty"`
 	AgentID          string         `json:"agent_id,omitempty"`
 	RunID            string         `json:"run_id,omitempty"`
+	UserID           string         `json:"user_id,omitempty"`
 	Metadata         map[string]any `json:"metadata,omitempty"`
 	Filters          map[string]any `json:"filters,omitempty"`
 	Infer            *bool          `json:"infer,omitempty"`
@@ -49,6 +50,7 @@ type SearchRequest struct {
 	BotID            string         `json:"bot_id,omitempty"`
 	AgentID          string         `json:"agent_id,omitempty"`
 	RunID            string         `json:"run_id,omitempty"`
+	UserID           string         `json:"user_id,omitempty"`
 	Limit            int            `json:"limit,omitempty"`
 	Filters          map[string]any `json:"filters,omitempty"`
 	Sources          []string       `json:"sources,omitempty"`

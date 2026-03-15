@@ -2352,10 +2352,15 @@ func (r *Resolver) loadMemoryContextMessage(ctx context.Context, req conversatio
 		"scopeId":   req.BotID,
 		"bot_id":    req.BotID,
 	}
+	// Add user_id filter if available for per-user memory isolation
+	if strings.TrimSpace(req.UserID) != "" {
+		filters["user_id"] = req.UserID
+	}
 
 	resp, err := r.memoryService.Search(ctx, memory.SearchRequest{
 		Query:   req.Query,
 		BotID:   req.BotID,
+		UserID:  req.UserID,
 		Limit:   memoryContextLimitPerScope,
 		Filters: filters,
 		NoStats: true,
@@ -2379,6 +2384,7 @@ func (r *Resolver) loadMemoryContextMessage(ctx context.Context, req conversatio
 		kwResp, kwErr := r.memoryService.Search(ctx, memory.SearchRequest{
 			Query:   kw,
 			BotID:   req.BotID,
+			UserID:  req.UserID,
 			Limit:   memoryContextLimitPerScope,
 			Filters: filters,
 			NoStats: true,
@@ -3065,9 +3071,14 @@ func (r *Resolver) addMemory(ctx context.Context, botID string, msgs []memory.Me
 		"scopeId":   scopeID,
 		"bot_id":    botID,
 	}
+	// Add user_id filter if available for per-user memory isolation
+	if strings.TrimSpace(mtc.userID) != "" {
+		filters["user_id"] = mtc.userID
+	}
 	result, err := r.memoryService.Add(ctx, memory.AddRequest{
 		Messages: msgs,
 		BotID:    botID,
+		UserID:   mtc.userID,
 		Filters:  filters,
 	})
 	durationMs := int(time.Since(start).Milliseconds())
