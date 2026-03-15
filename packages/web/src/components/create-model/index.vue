@@ -255,6 +255,24 @@
                 </FormControl>
               </FormItem>
             </FormField>
+
+            <!-- Enable Token Estimate (chat only) -->
+            <FormField
+              v-if="selectedType === 'chat'"
+              v-slot="{ componentField }"
+              name="enable_token_estimate"
+            >
+              <FormItem class="flex items-center justify-between">
+                <div>
+                  <Label>{{ $t('models.enableTokenEstimate') }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ $t('models.enableTokenEstimateHint') }}</p>
+                </div>
+                <Switch
+                  v-model="componentField.modelValue"
+                  @update:model-value="componentField['onUpdate:modelValue']"
+                />
+              </FormItem>
+            </FormField>
           </div>
           <DialogFooter class="mt-4">
             <DialogClose as-child>
@@ -321,6 +339,7 @@ const formSchema = toTypedSchema(z.object({
   fallback_model_id: z.string().optional(),
   reasoning: z.coerce.boolean().optional(),
   max_tokens: z.coerce.number().optional(),
+  enable_token_estimate: z.coerce.boolean().optional(),
 }))
 
 const form = useForm({

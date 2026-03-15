@@ -46,7 +46,7 @@ SELECT COUNT(*) FROM llm_providers;
 SELECT COUNT(*) FROM llm_providers WHERE client_type = sqlc.arg(client_type);
 
 -- name: CreateModel :one
-INSERT INTO models (model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens)
+INSERT INTO models (model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate)
 VALUES (
   sqlc.arg(model_id),
   sqlc.arg(name),
@@ -57,7 +57,8 @@ VALUES (
   sqlc.arg(context_window),
   sqlc.narg(fallback_model_id),
   sqlc.arg(reasoning),
-  sqlc.arg(max_tokens)
+  sqlc.arg(max_tokens),
+  sqlc.arg(enable_token_estimate)
 )
 RETURNING *;
 
@@ -105,6 +106,7 @@ SET
   fallback_model_id = sqlc.narg(fallback_model_id),
   reasoning = sqlc.arg(reasoning),
   max_tokens = sqlc.arg(max_tokens),
+  enable_token_estimate = sqlc.arg(enable_token_estimate),
   updated_at = now()
 WHERE id = sqlc.arg(id)
 RETURNING *;
@@ -122,6 +124,7 @@ SET
   fallback_model_id = sqlc.narg(fallback_model_id),
   reasoning = sqlc.arg(reasoning),
   max_tokens = sqlc.arg(max_tokens),
+  enable_token_estimate = sqlc.arg(enable_token_estimate),
   updated_at = now()
 WHERE model_id = sqlc.arg(model_id)
 RETURNING *;

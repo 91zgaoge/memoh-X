@@ -120,7 +120,7 @@ func (s *DBService) ListSince(ctx context.Context, botID string, since time.Time
 	rows, err := s.queries.ListMessagesSince(ctx, sqlc.ListMessagesSinceParams{
 		BotID:     pgBotID,
 		CreatedAt: pgtype.Timestamptz{Time: since, Valid: true},
-		MaxCount:  10000,
+		MaxCount:  1000, // Reduced from 10000 to avoid loading too many messages
 	})
 	if err != nil {
 		return nil, err

@@ -98,7 +98,7 @@ func (q *Queries) CreateLlmProvider(ctx context.Context, arg CreateLlmProviderPa
 }
 
 const createModel = `-- name: CreateModel :one
-INSERT INTO models (model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens)
+INSERT INTO models (model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate)
 VALUES (
   $1,
   $2,
@@ -109,22 +109,24 @@ VALUES (
   $7,
   $8,
   $9,
-  $10
+  $10,
+  $11
 )
-RETURNING id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at
+RETURNING id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at
 `
 
 type CreateModelParams struct {
-	ModelID         string      `json:"model_id"`
-	Name            pgtype.Text `json:"name"`
-	LlmProviderID   pgtype.UUID `json:"llm_provider_id"`
-	Dimensions      pgtype.Int4 `json:"dimensions"`
-	IsMultimodal    bool        `json:"is_multimodal"`
-	Type            string      `json:"type"`
-	ContextWindow   int32       `json:"context_window"`
-	FallbackModelID pgtype.UUID `json:"fallback_model_id"`
-	Reasoning       bool        `json:"reasoning"`
-	MaxTokens       int32       `json:"max_tokens"`
+	ModelID             string      `json:"model_id"`
+	Name                pgtype.Text `json:"name"`
+	LlmProviderID       pgtype.UUID `json:"llm_provider_id"`
+	Dimensions          pgtype.Int4 `json:"dimensions"`
+	IsMultimodal        bool        `json:"is_multimodal"`
+	Type                string      `json:"type"`
+	ContextWindow       int32       `json:"context_window"`
+	FallbackModelID     pgtype.UUID `json:"fallback_model_id"`
+	Reasoning           bool        `json:"reasoning"`
+	MaxTokens           int32       `json:"max_tokens"`
+	EnableTokenEstimate bool        `json:"enable_token_estimate"`
 }
 
 func (q *Queries) CreateModel(ctx context.Context, arg CreateModelParams) (Model, error) {
@@ -139,6 +141,7 @@ func (q *Queries) CreateModel(ctx context.Context, arg CreateModelParams) (Model
 		arg.FallbackModelID,
 		arg.Reasoning,
 		arg.MaxTokens,
+		arg.EnableTokenEstimate,
 	)
 	var i Model
 	err := row.Scan(
@@ -153,6 +156,7 @@ func (q *Queries) CreateModel(ctx context.Context, arg CreateModelParams) (Model
 		&i.FallbackModelID,
 		&i.Reasoning,
 		&i.MaxTokens,
+		&i.EnableTokenEstimate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -265,7 +269,7 @@ func (q *Queries) GetLlmProviderByName(ctx context.Context, name string) (LlmPro
 }
 
 const getModelByID = `-- name: GetModelByID :one
-SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at FROM models WHERE id = $1
+SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at FROM models WHERE id = $1
 `
 
 func (q *Queries) GetModelByID(ctx context.Context, id pgtype.UUID) (Model, error) {
@@ -290,7 +294,7 @@ func (q *Queries) GetModelByID(ctx context.Context, id pgtype.UUID) (Model, erro
 }
 
 const getModelByModelID = `-- name: GetModelByModelID :one
-SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at FROM models WHERE model_id = $1
+SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at FROM models WHERE model_id = $1
 `
 
 func (q *Queries) GetModelByModelID(ctx context.Context, modelID string) (Model, error) {
@@ -315,7 +319,7 @@ func (q *Queries) GetModelByModelID(ctx context.Context, modelID string) (Model,
 }
 
 const getModelFallback = `-- name: GetModelFallback :one
-SELECT fallback.id, fallback.model_id, fallback.name, fallback.llm_provider_id, fallback.dimensions, fallback.is_multimodal, fallback.type, fallback.context_window, fallback.fallback_model_id, fallback.reasoning, fallback.max_tokens, fallback.created_at, fallback.updated_at FROM models AS fallback
+SELECT fallback.id, fallback.model_id, fallback.name, fallback.llm_provider_id, fallback.dimensions, fallback.is_multimodal, fallback.type, fallback.context_window, fallback.fallback_model_id, fallback.reasoning, fallback.max_tokens, fallback.enable_token_estimate, fallback.created_at, fallback.updated_at FROM models AS fallback
 JOIN models AS primary_model ON primary_model.fallback_model_id = fallback.id
 WHERE primary_model.id = $1
 `
@@ -445,7 +449,7 @@ func (q *Queries) ListModelVariantsByModelUUID(ctx context.Context, modelUuid pg
 }
 
 const listModels = `-- name: ListModels :many
-SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at FROM models
+SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at FROM models
 ORDER BY created_at DESC
 `
 
@@ -470,6 +474,7 @@ func (q *Queries) ListModels(ctx context.Context) ([]Model, error) {
 			&i.FallbackModelID,
 			&i.Reasoning,
 			&i.MaxTokens,
+			&i.EnableTokenEstimate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -484,7 +489,7 @@ func (q *Queries) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 const listModelsByClientType = `-- name: ListModelsByClientType :many
-SELECT m.id, m.model_id, m.name, m.llm_provider_id, m.dimensions, m.is_multimodal, m.type, m.context_window, m.fallback_model_id, m.reasoning, m.max_tokens, m.created_at, m.updated_at FROM models AS m
+SELECT m.id, m.model_id, m.name, m.llm_provider_id, m.dimensions, m.is_multimodal, m.type, m.context_window, m.fallback_model_id, m.reasoning, m.max_tokens, m.enable_token_estimate, m.created_at, m.updated_at FROM models AS m
 JOIN llm_providers AS p ON p.id = m.llm_provider_id
 WHERE p.client_type = $1
 ORDER BY m.created_at DESC
@@ -511,6 +516,7 @@ func (q *Queries) ListModelsByClientType(ctx context.Context, clientType string)
 			&i.FallbackModelID,
 			&i.Reasoning,
 			&i.MaxTokens,
+			&i.EnableTokenEstimate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -525,7 +531,7 @@ func (q *Queries) ListModelsByClientType(ctx context.Context, clientType string)
 }
 
 const listModelsByProviderID = `-- name: ListModelsByProviderID :many
-SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at FROM models
+SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at FROM models
 WHERE llm_provider_id = $1
 ORDER BY created_at DESC
 `
@@ -551,6 +557,7 @@ func (q *Queries) ListModelsByProviderID(ctx context.Context, llmProviderID pgty
 			&i.FallbackModelID,
 			&i.Reasoning,
 			&i.MaxTokens,
+			&i.EnableTokenEstimate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -565,7 +572,7 @@ func (q *Queries) ListModelsByProviderID(ctx context.Context, llmProviderID pgty
 }
 
 const listModelsByProviderIDAndType = `-- name: ListModelsByProviderIDAndType :many
-SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at FROM models
+SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at FROM models
 WHERE llm_provider_id = $1
   AND type = $2
 ORDER BY created_at DESC
@@ -597,6 +604,7 @@ func (q *Queries) ListModelsByProviderIDAndType(ctx context.Context, arg ListMod
 			&i.FallbackModelID,
 			&i.Reasoning,
 			&i.MaxTokens,
+			&i.EnableTokenEstimate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -611,7 +619,7 @@ func (q *Queries) ListModelsByProviderIDAndType(ctx context.Context, arg ListMod
 }
 
 const listModelsByType = `-- name: ListModelsByType :many
-SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at FROM models
+SELECT id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at FROM models
 WHERE type = $1
 ORDER BY created_at DESC
 `
@@ -637,6 +645,7 @@ func (q *Queries) ListModelsByType(ctx context.Context, type_ string) ([]Model, 
 			&i.FallbackModelID,
 			&i.Reasoning,
 			&i.MaxTokens,
+			&i.EnableTokenEstimate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -707,22 +716,24 @@ SET
   fallback_model_id = $7,
   reasoning = $8,
   max_tokens = $9,
+  enable_token_estimate = $10,
   updated_at = now()
-WHERE id = $10
-RETURNING id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at
+WHERE id = $11
+RETURNING id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at
 `
 
 type UpdateModelParams struct {
-	Name            pgtype.Text `json:"name"`
-	LlmProviderID   pgtype.UUID `json:"llm_provider_id"`
-	Dimensions      pgtype.Int4 `json:"dimensions"`
-	IsMultimodal    bool        `json:"is_multimodal"`
-	Type            string      `json:"type"`
-	ContextWindow   int32       `json:"context_window"`
-	FallbackModelID pgtype.UUID `json:"fallback_model_id"`
-	Reasoning       bool        `json:"reasoning"`
-	MaxTokens       int32       `json:"max_tokens"`
-	ID              pgtype.UUID `json:"id"`
+	Name                pgtype.Text `json:"name"`
+	LlmProviderID       pgtype.UUID `json:"llm_provider_id"`
+	Dimensions          pgtype.Int4 `json:"dimensions"`
+	IsMultimodal        bool        `json:"is_multimodal"`
+	Type                string      `json:"type"`
+	ContextWindow       int32       `json:"context_window"`
+	FallbackModelID     pgtype.UUID `json:"fallback_model_id"`
+	Reasoning           bool        `json:"reasoning"`
+	MaxTokens           int32       `json:"max_tokens"`
+	EnableTokenEstimate bool        `json:"enable_token_estimate"`
+	ID                  pgtype.UUID `json:"id"`
 }
 
 func (q *Queries) UpdateModel(ctx context.Context, arg UpdateModelParams) (Model, error) {
@@ -736,6 +747,7 @@ func (q *Queries) UpdateModel(ctx context.Context, arg UpdateModelParams) (Model
 		arg.FallbackModelID,
 		arg.Reasoning,
 		arg.MaxTokens,
+		arg.EnableTokenEstimate,
 		arg.ID,
 	)
 	var i Model
@@ -751,6 +763,7 @@ func (q *Queries) UpdateModel(ctx context.Context, arg UpdateModelParams) (Model
 		&i.FallbackModelID,
 		&i.Reasoning,
 		&i.MaxTokens,
+		&i.EnableTokenEstimate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -770,23 +783,25 @@ SET
   fallback_model_id = $8,
   reasoning = $9,
   max_tokens = $10,
+  enable_token_estimate = $11,
   updated_at = now()
-WHERE model_id = $11
-RETURNING id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, created_at, updated_at
+WHERE model_id = $12
+RETURNING id, model_id, name, llm_provider_id, dimensions, is_multimodal, type, context_window, fallback_model_id, reasoning, max_tokens, enable_token_estimate, created_at, updated_at
 `
 
 type UpdateModelByModelIDParams struct {
-	NewModelID      string      `json:"new_model_id"`
-	Name            pgtype.Text `json:"name"`
-	LlmProviderID   pgtype.UUID `json:"llm_provider_id"`
-	Dimensions      pgtype.Int4 `json:"dimensions"`
-	IsMultimodal    bool        `json:"is_multimodal"`
-	Type            string      `json:"type"`
-	ContextWindow   int32       `json:"context_window"`
-	FallbackModelID pgtype.UUID `json:"fallback_model_id"`
-	Reasoning       bool        `json:"reasoning"`
-	MaxTokens       int32       `json:"max_tokens"`
-	ModelID         string      `json:"model_id"`
+	NewModelID          string      `json:"new_model_id"`
+	Name                pgtype.Text `json:"name"`
+	LlmProviderID       pgtype.UUID `json:"llm_provider_id"`
+	Dimensions          pgtype.Int4 `json:"dimensions"`
+	IsMultimodal        bool        `json:"is_multimodal"`
+	Type                string      `json:"type"`
+	ContextWindow       int32       `json:"context_window"`
+	FallbackModelID     pgtype.UUID `json:"fallback_model_id"`
+	Reasoning           bool        `json:"reasoning"`
+	MaxTokens           int32       `json:"max_tokens"`
+	EnableTokenEstimate bool        `json:"enable_token_estimate"`
+	ModelID             string      `json:"model_id"`
 }
 
 func (q *Queries) UpdateModelByModelID(ctx context.Context, arg UpdateModelByModelIDParams) (Model, error) {
@@ -801,6 +816,7 @@ func (q *Queries) UpdateModelByModelID(ctx context.Context, arg UpdateModelByMod
 		arg.FallbackModelID,
 		arg.Reasoning,
 		arg.MaxTokens,
+		arg.EnableTokenEstimate,
 		arg.ModelID,
 	)
 	var i Model
@@ -816,6 +832,7 @@ func (q *Queries) UpdateModelByModelID(ctx context.Context, arg UpdateModelByMod
 		&i.FallbackModelID,
 		&i.Reasoning,
 		&i.MaxTokens,
+		&i.EnableTokenEstimate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

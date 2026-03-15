@@ -9,7 +9,8 @@ import (
 const (
 	// DefaultGroupDebounceWindow is the default time window for merging group
 	// messages from the same conversation before dispatching them to the agent.
-	DefaultGroupDebounceWindow = 300 * time.Millisecond
+	// Optimized from 300ms to 50ms for faster response while still merging rapid bursts.
+	DefaultGroupDebounceWindow = 50 * time.Millisecond
 
 	// groupMessageSeparator is inserted between merged messages in the same window.
 	groupMessageSeparator = "\n---\n"

@@ -664,7 +664,7 @@ func (r *Resolver) resolve(ctx context.Context, req conversation.ChatRequest) (r
 
 	allMessages := make([]conversation.ModelMessage, len(messages))
 	copy(allMessages, messages)
-	messages, trimDiags, budgetDiag := pruneMessagesByTokenBudget(messages, chatModel.ContextWindow)
+	messages, trimDiags, budgetDiag := pruneMessagesByTokenBudget(messages, chatModel.ContextWindow, chatModel.EnableTokenEstimate)
 
 	r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
 		processlog.StepTokenBudgetCalculated, processlog.LevelInfo, "Token budget calculated",
@@ -3693,14 +3693,14 @@ func repruneWithLowerBudget(messages []conversation.ModelMessage, contextWindow 
 	return repairToolPairing(result)
 }
 
-func pruneMessagesByTokenBudget(messages []conversation.ModelMessage, contextWindow int) ([]conversation.ModelMessage, []toolTrimDiag, pruneDiag) {
+func pruneMessagesByTokenBudget(messages []conversation.ModelMessage, contextWindow int, enableTokenEstimate bool) ([]conversation.ModelMessage, []toolTrimDiag, pruneDiag) {
 	if contextWindow <= 0 {
 		contextWindow = 128000
 	}
 
 	// Performance optimization: Skip expensive token estimation if disabled (default)
 	// This eliminates O(N^2) JSON serialization overhead
-	if !getEnableTokenEstimate() {
+	if !enableTokenEstimate {
 		// Simple strategy: Keep only the most recent messages (up to 30)
 		// This is fast and works well for most conversations
 		const maxSimpleMessages = 30

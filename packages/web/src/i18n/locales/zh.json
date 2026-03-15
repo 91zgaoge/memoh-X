@@ -194,6 +194,8 @@
     "fallbackModelPlaceholder": "选择备用模型（模型故障时自动切换）",
     "fallbackModelHint": "主模型不可用时自动切换到此模型",
     "noFallback": "无备用模型",
+    "enableTokenEstimate": "启用 Token 估算",
+    "enableTokenEstimateHint": "开启后会进行精确的 Token 估算（较慢但更精确），关闭则使用快速模式提升性能",
     "testModel": "测试模型",
     "importFromProvider": "从服务商获取模型",
     "importedCount": "成功导入 {count} 个模型",

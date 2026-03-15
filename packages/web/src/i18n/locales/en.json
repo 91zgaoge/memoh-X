@@ -198,6 +198,8 @@
     "fallbackModelPlaceholder": "Select fallback model (auto-switch on failure)",
     "fallbackModelHint": "Backup model used when the primary model is unavailable",
     "noFallback": "No fallback",
+    "enableTokenEstimate": "Enable Token Estimation",
+    "enableTokenEstimateHint": "When enabled, performs precise token estimation (slower but more accurate). Disable for faster performance.",
     "testModel": "Test Model",
     "importFromProvider": "Import from Provider",
     "importedCount": "Imported {count} models",

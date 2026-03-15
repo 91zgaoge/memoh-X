@@ -58,17 +58,18 @@ const (
 )
 
 type Model struct {
-	ModelID         string    `json:"model_id"`
-	Name            string    `json:"name"`
-	LlmProviderID   string    `json:"llm_provider_id"`
-	IsMultimodal    bool      `json:"is_multimodal"`
-	Input           []string  `json:"input"`
-	Type            ModelType `json:"type"`
-	Dimensions      int       `json:"dimensions"`
-	ContextWindow   int       `json:"context_window"`
-	FallbackModelID string    `json:"fallback_model_id,omitempty"`
-	Reasoning       bool      `json:"reasoning"`
-	MaxTokens       int       `json:"max_tokens"`
+	ModelID             string    `json:"model_id"`
+	Name                string    `json:"name"`
+	LlmProviderID       string    `json:"llm_provider_id"`
+	IsMultimodal        bool      `json:"is_multimodal"`
+	Input               []string  `json:"input"`
+	Type                ModelType `json:"type"`
+	Dimensions          int       `json:"dimensions"`
+	ContextWindow       int       `json:"context_window"`
+	FallbackModelID     string    `json:"fallback_model_id,omitempty"`
+	Reasoning           bool      `json:"reasoning"`
+	MaxTokens           int       `json:"max_tokens"`
+	EnableTokenEstimate bool      `json:"enable_token_estimate"` // 是否启用 Token 估算，默认关闭以提升性能
 }
 
 func (m *Model) Validate() error {

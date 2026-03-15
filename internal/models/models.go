@@ -45,13 +45,14 @@ func (s *Service) Create(ctx context.Context, req AddRequest) (AddResponse, erro
 	}
 
 	params := sqlc.CreateModelParams{
-		ModelID:       model.ModelID,
-		LlmProviderID: llmProviderID,
-		IsMultimodal:  model.IsMultimodal,
-		Type:          string(model.Type),
-		ContextWindow: contextWindow,
-		Reasoning:     model.Reasoning,
-		MaxTokens:     int32(model.MaxTokens),
+		ModelID:             model.ModelID,
+		LlmProviderID:       llmProviderID,
+		IsMultimodal:        model.IsMultimodal,
+		Type:                string(model.Type),
+		ContextWindow:       contextWindow,
+		Reasoning:           model.Reasoning,
+		MaxTokens:           int32(model.MaxTokens),
+		EnableTokenEstimate: model.EnableTokenEstimate,
 	}
 
 	// Handle optional name field
@@ -216,12 +217,13 @@ func (s *Service) UpdateByID(ctx context.Context, id string, req UpdateRequest) 
 	}
 
 	params := sqlc.UpdateModelParams{
-		ID:            uuid,
-		IsMultimodal:  model.IsMultimodal,
-		Type:          string(model.Type),
-		ContextWindow: contextWindow,
-		Reasoning:     model.Reasoning,
-		MaxTokens:     int32(model.MaxTokens),
+		ID:                  uuid,
+		IsMultimodal:        model.IsMultimodal,
+		Type:                string(model.Type),
+		ContextWindow:       contextWindow,
+		Reasoning:           model.Reasoning,
+		MaxTokens:           int32(model.MaxTokens),
+		EnableTokenEstimate: model.EnableTokenEstimate,
 	}
 
 	llmProviderID, err := db.ParseUUID(model.LlmProviderID)
@@ -271,13 +273,14 @@ func (s *Service) UpdateByModelID(ctx context.Context, modelID string, req Updat
 	}
 
 	params := sqlc.UpdateModelByModelIDParams{
-		ModelID:       modelID,
-		NewModelID:    model.ModelID,
-		IsMultimodal:  model.IsMultimodal,
-		Type:          string(model.Type),
-		ContextWindow: contextWindow,
-		Reasoning:     model.Reasoning,
-		MaxTokens:     int32(model.MaxTokens),
+		ModelID:             modelID,
+		NewModelID:          model.ModelID,
+		IsMultimodal:        model.IsMultimodal,
+		Type:                string(model.Type),
+		ContextWindow:       contextWindow,
+		Reasoning:           model.Reasoning,
+		MaxTokens:           int32(model.MaxTokens),
+		EnableTokenEstimate: model.EnableTokenEstimate,
 	}
 
 	llmProviderID, err := db.ParseUUID(model.LlmProviderID)
@@ -365,13 +368,14 @@ func (s *Service) convertToGetResponse(ctx context.Context, dbModel sqlc.Model) 
 	resp := GetResponse{
 		ModelID: dbModel.ModelID,
 		Model: Model{
-			ModelID:       dbModel.ModelID,
-			IsMultimodal:  dbModel.IsMultimodal,
-			Input:         modelInputFromMultimodal(dbModel.IsMultimodal),
-			Type:          ModelType(dbModel.Type),
-			ContextWindow: int(dbModel.ContextWindow),
-			Reasoning:     dbModel.Reasoning,
-			MaxTokens:     int(dbModel.MaxTokens),
+			ModelID:             dbModel.ModelID,
+			IsMultimodal:        dbModel.IsMultimodal,
+			Input:               modelInputFromMultimodal(dbModel.IsMultimodal),
+			Type:                ModelType(dbModel.Type),
+			ContextWindow:       int(dbModel.ContextWindow),
+			Reasoning:           dbModel.Reasoning,
+			MaxTokens:           int(dbModel.MaxTokens),
+			EnableTokenEstimate: dbModel.EnableTokenEstimate,
 		},
 	}
 
