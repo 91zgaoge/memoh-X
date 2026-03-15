@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -50,7 +51,18 @@ const (
 
 	repetitiveResponseJaccardThreshold = 0.85
 	lastResponseTTL                    = 30 * time.Minute
+
+	// enableTokenEstimateEnv is the environment variable to control token estimation.
+	// When set to "true", token estimation is enabled (slower but more precise).
+	// Default is "false" for better performance.
+	enableTokenEstimateEnv = "MEMOH_ENABLE_TOKEN_ESTIMATE"
 )
+
+// getEnableTokenEstimate returns whether token estimation is enabled.
+// Default is false for performance optimization.
+func getEnableTokenEstimate() bool {
+	return os.Getenv(enableTokenEstimateEnv) == "true"
+}
 
 type lastResponseEntry struct {
 	text      string
@@ -543,20 +555,21 @@ func (r *Resolver) resolve(ctx context.Context, req conversation.ChatRequest) (r
 
 	var messages []conversation.ModelMessage
 	if !skipHistory && r.conversationSvc != nil {
-		msgs, err := r.loadMessages(ctx, req.ChatID, maxCtx)
+		// Optimized: loadMessages now directly limits messages by historyLimit
+		// This eliminates the need for a separate limitHistoryTurns call
+		msgs, err := r.loadMessages(ctx, req.ChatID, historyLimit)
 		if err != nil {
 			r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
 				processlog.StepHistoryLoaded, processlog.LevelError, "Message load failed",
 				map[string]any{"error": err.Error()}, 0)
 			return resolvedContext{}, err
 		}
-		messages = limitHistoryTurns(msgs, historyLimit)
+		messages = msgs
 
 		r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
 			processlog.StepHistoryLoaded, processlog.LevelInfo, "History loaded",
 			map[string]any{
-				"message_count": len(msgs),
-				"after_limit":   len(messages),
+				"message_count": len(messages),
 				"history_limit": historyLimit,
 			}, 0)
 
@@ -2185,16 +2198,35 @@ func (r *Resolver) resolveContainerID(ctx context.Context, botID, explicit strin
 
 // --- message loading ---
 
-func (r *Resolver) loadMessages(ctx context.Context, chatID string, maxContextMinutes int) ([]conversation.ModelMessage, error) {
+func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit int) ([]conversation.ModelMessage, error) {
 	if r.messageService == nil {
 		return nil, nil
 	}
-	since := time.Now().UTC().Add(-time.Duration(maxContextMinutes) * time.Minute)
-	msgs, err := r.messageService.ListSince(ctx, chatID, since)
+
+	// Optimized: Use ListLatest instead of ListSince to directly limit message count
+	// This avoids loading thousands of messages and then filtering in memory
+	maxMsgs := int32(historyLimit * 3)
+	if maxMsgs > 200 {
+		maxMsgs = 200 // Absolute hard limit to prevent loading too many messages
+	}
+	if maxMsgs < 20 {
+		maxMsgs = 20 // Minimum to ensure some context
+	}
+
+	msgs, err := r.messageService.ListLatest(ctx, chatID, maxMsgs)
 	if err != nil {
 		return nil, err
 	}
+
+	// Reverse to get oldest-first order (ListLatest returns newest-first)
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+
 	var result []conversation.ModelMessage
+	userTurns := 0
+
+	// Process messages and apply history limit in a single pass
 	for _, m := range msgs {
 		var mm conversation.ModelMessage
 		if err := json.Unmarshal(m.Content, &mm); err != nil {
@@ -2205,7 +2237,16 @@ func (r *Resolver) loadMessages(ctx context.Context, chatID string, maxContextMi
 			mm.Role = m.Role
 		}
 		result = append(result, mm)
+
+		// Count user turns for limiting
+		if m.Role == "user" {
+			userTurns++
+			if userTurns >= historyLimit {
+				break
+			}
+		}
 	}
+
 	return result, nil
 }
 
@@ -3590,6 +3631,7 @@ type pruneDiag struct {
 	EstimatedTotalAfter  int `json:"estimated_total_after"`
 	ProtectedTail       int `json:"protected_tail"`
 	Pruned              bool `json:"pruned"`
+	Skipped             bool `json:"skipped,omitempty"` // True when token estimation is skipped for performance
 }
 
 // repruneWithLowerBudget re-runs context pruning with a custom budgetRatio
@@ -3654,6 +3696,29 @@ func repruneWithLowerBudget(messages []conversation.ModelMessage, contextWindow 
 func pruneMessagesByTokenBudget(messages []conversation.ModelMessage, contextWindow int) ([]conversation.ModelMessage, []toolTrimDiag, pruneDiag) {
 	if contextWindow <= 0 {
 		contextWindow = 128000
+	}
+
+	// Performance optimization: Skip expensive token estimation if disabled (default)
+	// This eliminates O(N^2) JSON serialization overhead
+	if !getEnableTokenEstimate() {
+		// Simple strategy: Keep only the most recent messages (up to 30)
+		// This is fast and works well for most conversations
+		const maxSimpleMessages = 30
+		if len(messages) <= maxSimpleMessages {
+			return messages, nil, pruneDiag{
+				Skipped:               true,
+				EstimatedTotalBefore:  len(messages),
+				EstimatedTotalAfter:   len(messages),
+			}
+		}
+		// Keep the last 30 messages
+		result := messages[len(messages)-maxSimpleMessages:]
+		return repairToolPairing(result), nil, pruneDiag{
+			Skipped:               true,
+			Pruned:                true,
+			EstimatedTotalBefore:  len(messages),
+			EstimatedTotalAfter:   len(result),
+		}
 	}
 
 	messages, trimDiags := softTrimToolResults(messages, contextWindow)
@@ -3957,8 +4022,10 @@ func (r *Resolver) asyncSummarize(
 
 		msgsToSummarize := droppedCopy
 		if strings.TrimSpace(existingSummary) != "" {
+			// Use "user" role instead of "system" to avoid Jinja template validation issues
+			// with llama.cpp models like Qwen 3.5 that require system messages at the beginning.
 			summaryMsg := conversation.ModelMessage{
-				Role:    "system",
+				Role:    "user",
 				Content: conversation.NewTextContent("Previous conversation summary:\n" + existingSummary),
 			}
 			msgsToSummarize = append([]conversation.ModelMessage{summaryMsg}, droppedCopy...)

@@ -104,6 +104,7 @@ type MsgCallbackBody struct {
 type FromInfo struct {
 	UserID string `json:"userid"`
 	CorpID string `json:"corpid,omitempty"`
+	Name   string `json:"name,omitempty"`
 }
 
 // ========== 消息内容结构 ==========
