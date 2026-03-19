@@ -1,5 +1,28 @@
 # Memoh-v2 更新日志
 
+## [2026-03-20] 修复 WeCom 图片识别失败
+
+### 问题
+WeCom 对话中发送图片后，模型完全无法识别图片内容。
+
+### 根本原因
+
+**Bug 1（致命）**: `agent/src/agent.ts` 的 `stream()` 函数在 OpenAI 路径中对图片内容数组使用 `JSON.stringify()`，导致模型收到 JSON 字符串而非正确的 `image_url` 多模态内容块。影响所有非 kimi-coding 模型（包括本地 Qwen/llama）。
+
+**Bug 2（次要）**: `InputAttachment` 结构体未保存 MIME 类型，图片 MIME 在 Go→TS 管道中丢失，导致 Anthropic 路径的 `media_type` 始终硬编码为 `image/jpeg`。
+
+### 修复
+- 新增 `serializeContentForOpenAI()` 函数，正确将 ImagePart 转为 `{type: 'image_url', image_url: {url: 'data:<mime>;base64,...'}}` 格式
+- MIME 类型全链路传递：`InputAttachment.MimeType` → `buildGatewayAttachments()` → `ImageAttachment.mimeType` → 序列化时动态使用
+
+**修改文件**: `agent/src/agent.ts`, `agent/src/models.ts`, `agent/src/types/attachment.ts`, `internal/conversation/types.go`, `internal/channel/inbound/channel.go`, `internal/conversation/flow/resolver.go`
+
+**详细文档**: `docs/fix-image-recognition-2026-03-20.md`
+
+**Git 提交**: `26bce0b3`
+
+---
+
 ## [2026-03-19] WeCom 消息隔离 + 心跳任务隔离 + 上下文超限修复
 
 ### WeCom 消息串扰修复
