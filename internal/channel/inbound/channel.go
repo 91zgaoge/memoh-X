@@ -215,7 +215,9 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 	// For group conversations with the debouncer enabled, buffer the message text
 	// and fire the agent with a merged query after the window expires.
 	if p.groupDebouncer != nil && !isDirectConversationType(msg.Conversation.Type) {
-		debounceKey := strings.TrimSpace(identity.BotID) + ":" + strings.TrimSpace(activeChatID)
+		// Use the actual conversation ID (group chatID or single-chat userID) rather than botID,
+		// so messages from different groups/users are debounced in separate buckets.
+		debounceKey := strings.TrimSpace(identity.BotID) + ":" + strings.TrimSpace(msg.Conversation.ID)
 		capturedMsg := msg
 		capturedCfg := cfg
 		capturedSender := sender
@@ -534,7 +536,11 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 			p.logProcessingStatusError("processing_completed", msg, identity, notifyErr)
 		}
 	}
-	go p.broadcastToOtherChannels(identity.BotID, activeChatID, strings.ToLower(msg.Channel.String()), target, outputs)
+	// Broadcast disabled: bot-centric chatID (= botID) causes ListChatRoutes to return ALL routes
+	// for this bot, which would mirror every reply to every other user/group. Each route must
+	// receive only its own response. Cross-platform sync should be re-implemented with proper
+	// per-conversation scoping before re-enabling.
+	// go p.broadcastToOtherChannels(identity.BotID, activeChatID, strings.ToLower(msg.Channel.String()), target, outputs)
 	return nil
 }
 
@@ -1437,7 +1443,9 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 		return streamErr
 	}
 	outputs := flow.ExtractAssistantOutputs(finalMessages)
-	go p.broadcastToOtherChannels(identity.BotID, activeChatID, strings.ToLower(msg.Channel.String()), target, outputs)
+	// Broadcast disabled: see comment above the other broadcastToOtherChannels call site.
+	// go p.broadcastToOtherChannels(identity.BotID, activeChatID, strings.ToLower(msg.Channel.String()), target, outputs)
+	_ = outputs
 	_ = collectedUsage
 	return nil
 }

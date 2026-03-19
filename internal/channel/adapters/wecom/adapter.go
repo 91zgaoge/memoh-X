@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/route"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/message"
 	"golang.org/x/time/rate"
 )
@@ -69,6 +70,7 @@ type Adapter struct {
 	mu             sync.RWMutex
 	httpClient     *http.Client
 	messageService message.Service // Optional: for clearing history on new chat
+	routeService   route.Service   // Optional: for per-route history clearing on new chat
 
 	// Rate limiters for send message
 	// WeCom限制：30条/分钟，1000条/小时
@@ -98,6 +100,11 @@ func NewWeComAdapter(logger *slog.Logger) *Adapter {
 // SetMessageService sets the message service for history management
 func (a *Adapter) SetMessageService(svc message.Service) {
 	a.messageService = svc
+}
+
+// SetRouteService sets the route service used to resolve per-user/group route IDs.
+func (a *Adapter) SetRouteService(svc route.Service) {
+	a.routeService = svc
 }
 
 // NewAdapter creates a new WeCom adapter
@@ -922,6 +929,35 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 		slog.Bool("group_chat_enabled", config.GroupChatEnabled),
 		slog.Bool("require_mention", config.RequireMention))
 
+	// According to the WeCom AI Bot SDK spec, BaseMessage.chatid is only present
+	// for group chats. For single chats the field is absent (empty string).
+	// We use the sender's userid as the conversation ID for single chats so that
+	// each user gets an isolated bot_channel_routes entry and independent history.
+	conversationID := body.ChatID
+	if conversationID == "" {
+		conversationID = body.From.UserID
+	}
+	isGroup := body.ChatType == "group"
+
+	// Collect full sender + scene identity for downstream context.
+	// IMPORTANT: req_id must be present so inbound/channel.go can pass it to OpenStream,
+	// which uses it to select CmdRespondMsg (reply to message) vs CmdSendMsg (proactive).
+	senderMeta := map[string]any{
+		"req_id":       wsMsg.Headers.ReqID, // critical for WeCom respond-mode routing
+		"from_user_id": body.From.UserID,
+		"user_id":      body.From.UserID, // legacy key kept for compatibility
+		"chat_type":    body.ChatType,
+		"chattype":     body.ChatType, // legacy key kept for compatibility
+		"chat_id":      body.ChatID,   // raw SDK chatid (empty for single chat)
+		"is_group":     isGroup,
+	}
+	if body.From.Name != "" {
+		senderMeta["sender_name"] = body.From.Name
+	}
+	if body.From.CorpID != "" {
+		senderMeta["corp_id"] = body.From.CorpID
+	}
+
 	// Convert to internal message
 	msg := channel.InboundMessage{
 		Channel: Type,
@@ -930,30 +966,23 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 			SubjectID: body.From.UserID,
 		},
 		Conversation: channel.Conversation{
-			ID:   body.ChatID,
+			ID:   conversationID, // userid for single chat; group chatid for group chat
 			Type: body.ChatType,
 			Metadata: map[string]any{
-				"chattype": body.ChatType,
-				"chat_id":  body.ChatID,
+				"chat_type":    body.ChatType,
+				"chattype":     body.ChatType, // legacy
+				"chat_id":      body.ChatID,   // raw SDK chatid
+				"from_user_id": body.From.UserID,
+				"is_group":     isGroup,
 			},
 		},
 		ReplyTarget: replyTarget,
 		Message: channel.Message{
-			ID: body.MsgID,
-			Metadata: map[string]any{
-				"req_id":   wsMsg.Headers.ReqID,
-				"chat_id":  body.ChatID,
-				"user_id":  body.From.UserID,
-				"chattype": body.ChatType,
-			},
+			ID:       body.MsgID,
+			Metadata: senderMeta,
 		},
 		ReceivedAt: time.Now(),
-		Metadata: map[string]any{
-			"req_id":   wsMsg.Headers.ReqID,
-			"chat_id":  body.ChatID,
-			"user_id":  body.From.UserID,
-			"chattype": body.ChatType,
-		},
+		Metadata:   senderMeta,
 	}
 
 	// Process based on message type
@@ -1472,11 +1501,34 @@ func (a *Adapter) handleNewChatCommand(ctx context.Context, cfg channel.ChannelC
 		slog.String("user_id", body.From.UserID),
 		slog.String("bot_id", cfg.BotID))
 
-	// Clear history if message service is available
+	// Clear history scoped to the invoking user/group's route only.
+	// Previously this called DeleteByBot which would erase ALL users' history for this bot.
 	if a.messageService != nil {
-		if err := a.messageService.DeleteByBot(ctx, cfg.BotID); err != nil {
-			a.logger.Error("failed to clear history", slog.Any("error", err))
-			// Continue to send confirmation even if delete failed
+		cleared := false
+		if a.routeService != nil {
+			// Determine the conversation ID: for group chats use ChatID, for single chats use the sender's UserID.
+			convID := body.ChatID
+			if convID == "" {
+				convID = body.From.UserID
+			}
+			r, err := a.routeService.Find(ctx, cfg.BotID, "wecom", convID, "")
+			if err == nil && r.ID != "" {
+				if delErr := a.messageService.DeleteByRoute(ctx, r.ID); delErr != nil {
+					a.logger.Error("failed to clear history by route", slog.String("route_id", r.ID), slog.Any("error", delErr))
+				} else {
+					a.logger.Info("history cleared by route", slog.String("route_id", r.ID))
+					cleared = true
+				}
+			} else {
+				a.logger.Warn("route not found for new chat command, falling back to bot-level clear",
+					slog.String("conv_id", convID), slog.Any("error", err))
+			}
+		}
+		if !cleared {
+			// Fallback: no routeService or route lookup failed – clear entire bot history.
+			if err := a.messageService.DeleteByBot(ctx, cfg.BotID); err != nil {
+				a.logger.Error("failed to clear history", slog.Any("error", err))
+			}
 		}
 	}
 
@@ -1682,6 +1734,30 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 			slog.String("req_id", reqID))
 	}
 
+	// Same single-chat fix: use sender userid when chatid is absent (single chat)
+	mixedConvID := body.ChatID
+	if mixedConvID == "" {
+		mixedConvID = body.From.UserID
+	}
+	mixedIsGroup := body.ChatType == "group"
+	mixedMeta := map[string]any{
+		"req_id":       reqID,
+		"from_user_id": body.From.UserID,
+		"user_id":      body.From.UserID, // legacy
+		"chat_id":      body.ChatID,      // raw SDK chatid
+		"chat_type":    body.ChatType,
+		"chattype":     body.ChatType, // legacy
+		"is_group":     mixedIsGroup,
+		// For group chats with mixed content, mark as mentioned (contains images)
+		"is_mentioned": mixedIsGroup,
+	}
+	if body.From.Name != "" {
+		mixedMeta["sender_name"] = body.From.Name
+	}
+	if body.From.CorpID != "" {
+		mixedMeta["corp_id"] = body.From.CorpID
+	}
+
 	msg := channel.InboundMessage{
 		Channel: Type,
 		BotID:   cfg.BotID,
@@ -1689,11 +1765,14 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 			SubjectID: body.From.UserID,
 		},
 		Conversation: channel.Conversation{
-			ID:   body.ChatID,
+			ID:   mixedConvID, // userid for single chat; group chatid for group chat
 			Type: body.ChatType,
 			Metadata: map[string]any{
-				"chattype": body.ChatType,
-				"chat_id":  body.ChatID,
+				"chat_type":    body.ChatType,
+				"chattype":     body.ChatType, // legacy
+				"chat_id":      body.ChatID,   // raw SDK chatid
+				"from_user_id": body.From.UserID,
+				"is_group":     mixedIsGroup,
 			},
 		},
 		ReplyTarget: replyTarget,
@@ -1702,21 +1781,10 @@ func (a *Adapter) handleMixedContent(ctx context.Context, cfg channel.ChannelCon
 			Text:        finalContent,
 			Format:      channel.MessageFormatPlain,
 			Attachments: attachments,
-			Metadata: map[string]any{
-				"req_id":  reqID,
-				"chat_id": body.ChatID,
-				"user_id": body.From.UserID,
-			},
+			Metadata:    mixedMeta,
 		},
 		ReceivedAt: time.Now(),
-		Metadata: map[string]any{
-			"req_id":   reqID,
-			"chat_id":  body.ChatID,
-			"user_id":  body.From.UserID,
-			"chattype": body.ChatType,
-			// For group chats with mixed content, mark as mentioned (contains images)
-			"is_mentioned": body.ChatType == "group",
-		},
+		Metadata:   mixedMeta,
 	}
 
 	// Send immediate "thinking" reply for better UX
