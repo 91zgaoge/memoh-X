@@ -1072,9 +1072,16 @@ func (r *Resolver) executeTrigger(ctx context.Context, p triggerParams, token st
 		slog.String("query", truncate(p.query, 200)),
 	)
 	triggerTotalStart := time.Now()
+	isHeartbeat := p.schedule.TriggerType == "heartbeat"
 	taskType := "schedule"
-	if p.schedule.TriggerType == "heartbeat" {
+	if isHeartbeat {
 		taskType = "heartbeat"
+	}
+	// Heartbeat tasks must NOT load user conversation history - they are
+	// stateless background jobs and should run independently.
+	maxCtxLoadTime := 0
+	if isHeartbeat {
+		maxCtxLoadTime = -1
 	}
 	req := conversation.ChatRequest{
 		BotID:                p.botID,
@@ -1086,6 +1093,7 @@ func (r *Resolver) executeTrigger(ctx context.Context, p triggerParams, token st
 		CurrentChannel:       p.platform,
 		ReplyTarget:          p.replyTarget,
 		TaskType:             taskType,
+		MaxContextLoadTime:   maxCtxLoadTime,
 	}
 	if p.platform != "" {
 		req.Channels = []string{p.platform}
@@ -1172,7 +1180,6 @@ func (r *Resolver) executeTrigger(ctx context.Context, p triggerParams, token st
 	// response to the channel directly so the user receives it.
 	// Skip for heartbeat triggers — their maintenance reports are noise for the user.
 	// Priority: (1) LLM text response, (2) last tool-result readable content.
-	isHeartbeat := p.schedule.TriggerType == "heartbeat"
 	if r.triggerSender != nil &&
 		!isHeartbeat &&
 		strings.TrimSpace(p.platform) != "" &&
@@ -1215,9 +1222,15 @@ func (r *Resolver) executeTrigger(ctx context.Context, p triggerParams, token st
 	// Extract file attachments from sync trigger response.
 	req.FileAttachments = extractGatewayAttachments(resp.Attachments)
 
-	if err := r.storeRound(ctx, req, resp.Messages, resp.Usage); err != nil {
-		r.logger.Warn("executeTrigger: storeRound failed", slog.String("bot_id", p.botID), slog.Any("error", err))
-		return err
+	// Skip persisting heartbeat rounds: maintenance results must not pollute user
+	// conversation history.  Heartbeat tasks are stateless background jobs; their
+	// output is surfaced via evolution logs or direct channel messages, never via
+	// the shared bot_history_messages table that user DM history loading reads from.
+	if !isHeartbeat {
+		if err := r.storeRound(ctx, req, resp.Messages, resp.Usage); err != nil {
+			r.logger.Warn("executeTrigger: storeRound failed", slog.String("bot_id", p.botID), slog.Any("error", err))
+			return err
+		}
 	}
 
 	triggerTotalDur := int(time.Since(triggerTotalStart).Milliseconds())
@@ -2211,7 +2224,10 @@ func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit
 
 	// Process messages and apply history limit in a single pass
 	// Also apply token-based limiting to prevent context overflow
-	const maxTotalTokens = 80000 // ~60K tokens for messages, leaving room for system prompt and response
+	// llama-server actual context: 262144 (256K)
+	// Budget: system prompt ~30K + response ~30K + overhead ~10K = 70K reserved
+	// Max available for history: 262144 - 70K*4/3(chars→tokens) ≈ 150K tokens safe cap
+	const maxTotalTokens = 150000 // safe cap for 256K context window
 	var estimatedTokens int
 
 	for i, m := range msgs {
