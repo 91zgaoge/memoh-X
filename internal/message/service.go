@@ -170,6 +170,17 @@ func (s *DBService) DeleteByBot(ctx context.Context, botID string) error {
 	return s.queries.DeleteMessagesByBot(ctx, pgBotID)
 }
 
+// DeleteByRoute deletes all messages for a specific route (conversation).
+// Use this instead of DeleteByBot when /new is invoked from a channel, so that
+// only the invoking user's history is cleared, not all users sharing the same bot.
+func (s *DBService) DeleteByRoute(ctx context.Context, routeID string) error {
+	pgRouteID, err := dbpkg.ParseUUID(routeID)
+	if err != nil {
+		return err
+	}
+	return s.queries.DeleteMessagesByRoute(ctx, pgRouteID)
+}
+
 func toMessageFromCreate(row sqlc.CreateMessageRow) Message {
 	return toMessageFields(
 		row.ID,

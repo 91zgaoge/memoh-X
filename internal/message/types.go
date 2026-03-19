@@ -51,4 +51,7 @@ type Service interface {
 	ListLatest(ctx context.Context, botID string, limit int32) ([]Message, error)
 	ListBefore(ctx context.Context, botID string, before time.Time, limit int32) ([]Message, error)
 	DeleteByBot(ctx context.Context, botID string) error
+	// DeleteByRoute deletes all messages for a specific route (conversation), without affecting
+	// other users/groups talking to the same bot.
+	DeleteByRoute(ctx context.Context, routeID string) error
 }

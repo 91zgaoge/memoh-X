@@ -443,3 +443,12 @@ func (q *Queries) ListMessagesSince(ctx context.Context, arg ListMessagesSincePa
 	}
 	return items, nil
 }
+
+// DeleteMessagesByRoute deletes all messages for a specific route.
+// NOTE: hand-written extension to the sqlc-generated file.
+const deleteMessagesByRoute = `DELETE FROM bot_history_messages WHERE route_id = $1`
+
+func (q *Queries) DeleteMessagesByRoute(ctx context.Context, routeID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteMessagesByRoute, routeID)
+	return err
+}

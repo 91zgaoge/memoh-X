@@ -465,7 +465,7 @@ func provideChatResolver(log *slog.Logger, cfg config.Config, gs *globalsettings
 // channel providers
 // ---------------------------------------------------------------------------
 
-func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, msgService *message.DBService) *channel.Registry {
+func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, msgService *message.DBService, routeService *route.DBService) *channel.Registry {
 	registry := channel.NewRegistry()
 	registry.MustRegister(telegram.NewTelegramAdapter(log))
 	registry.MustRegister(feishu.NewFeishuAdapter(log))
@@ -474,10 +474,13 @@ func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, msgService *m
 	registry.MustRegister(local.NewWebAdapter(hub))
 	registry.MustRegister(wechat.NewWeChatAdapter(log))
 
-	// WeCom adapter with message service for "new chat" command
+	// WeCom adapter with message/route services for per-route history clearing on "new chat" command.
 	wecomAdapter := wecom.NewWeComAdapter(log)
 	if msgService != nil {
 		wecomAdapter.SetMessageService(msgService)
+	}
+	if routeService != nil {
+		wecomAdapter.SetRouteService(routeService)
 	}
 	registry.MustRegister(wecomAdapter)
 
