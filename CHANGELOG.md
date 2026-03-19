@@ -1,5 +1,45 @@
 # Memoh-v2 更新日志
 
+## [2026-03-20] MCP OAuth 支持 + Workspace 架构重构
+
+### 概述
+同步上游 `memohai/Memoh` 两大核心功能更新。
+
+**Phase A - MCP OAuth 认证支持**:
+- 新增 OAuth 2.0 + PKCE 认证流程，支持需要 Bearer Token 的 MCP 服务器
+- 新增 `mcp_oauth_tokens` 表存储 Token 信息
+- 新增 OAuthService 实现自动发现、授权、Token 刷新
+- 新增 API 端点 `/bots/:id/mcp/:id/oauth/*`
+- 数据库迁移: `0046_mcp_probe_and_oauth`
+
+**Phase B - Workspace 架构重构**:
+- 全新 `internal/workspace/` 包替代旧版 `internal/mcp/manager.go`
+- 容器前缀从 `mcp-{id}` 改为 `workspace-{id}`
+- 通信方式从 TCP gRPC 改为 Unix Domain Socket
+- 引入 `WorkspaceService` 接口解耦 containerd 依赖
+- 支持容器快照版本管理 (create/rollback/version)
+- 数据库迁移: `0047_workspace_snapshot_meta`
+
+### 关键文件
+- 新增: `internal/mcp/oauth.go`, `internal/workspace/` (完整包), `internal/containerd/workspace_*.go`
+- 迁移: `db/migrations/0046_*.sql`, `db/migrations/0047_*.sql`
+- 修复: `bridge.pb.go` protobuf rawDesc 损坏导致的 panic
+
+### 部署说明
+```bash
+# 运行数据库迁移
+bash scripts/db-up.sh
+
+# 重启服务
+docker compose build server
+docker compose stop server && docker compose up -d server
+```
+
+**详细文档**: [RELEASE_NOTES_2025_03_20.md](./RELEASE_NOTES_2025_03_20.md)
+**Git 提交**: `c3ac48c5`
+
+---
+
 ## [2026-03-20] 修复 WeCom 图片识别失败
 
 ### 问题
