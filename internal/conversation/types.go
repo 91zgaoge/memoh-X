@@ -219,9 +219,10 @@ type ToolCallFunction struct {
 
 // InputAttachment carries a user-supplied attachment (e.g. image) to be forwarded to the LLM.
 type InputAttachment struct {
-	Type   string `json:"type"`   // "image" or "file"
-	Base64 string `json:"base64"` // base64-encoded binary data
-	Path   string `json:"path"`   // optional file path
+	Type     string `json:"type"`              // "image" or "file"
+	Base64   string `json:"base64"`            // base64-encoded binary data
+	Path     string `json:"path"`              // optional file path
+	MimeType string `json:"mime_type,omitempty"` // MIME type of the attachment (e.g. "image/jpeg")
 }
 
 // ChatRequest is the input for Chat and StreamChat.

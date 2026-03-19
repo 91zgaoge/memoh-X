@@ -1982,10 +1982,14 @@ func buildGatewayAttachments(inputs []conversation.InputAttachment) []any {
 		if att.Base64 == "" {
 			continue
 		}
-		out = append(out, map[string]string{
+		m := map[string]string{
 			"type":   att.Type,
 			"base64": att.Base64,
-		})
+		}
+		if att.MimeType != "" {
+			m["mime_type"] = att.MimeType
+		}
+		out = append(out, m)
 	}
 	if len(out) == 0 {
 		return []any{}

@@ -6,6 +6,7 @@ export interface BaseAgentAttachment {
 export interface ImageAttachment extends BaseAgentAttachment {
   type: 'image'
   base64: string
+  mimeType?: string
 }
 
 export interface ContainerFileAttachment extends BaseAgentAttachment {

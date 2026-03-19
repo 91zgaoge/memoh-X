@@ -59,6 +59,7 @@ export const ScheduleModel = z.object({
 export const ImageAttachmentModel = z.object({
   type: z.literal('image'),
   base64: z.string().min(1, 'Image base64 is required'),
+  mimeType: z.string().optional(),
   metadata: z.record(z.string(), z.any()).optional(),
 })
 

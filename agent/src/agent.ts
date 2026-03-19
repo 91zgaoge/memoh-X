@@ -363,7 +363,11 @@ export const createAgent = (
       content: [
         { type: 'text', text },
         ...images.map(
-          (image) => ({ type: 'image', image: image.base64 }) as ImagePart,
+          (image) => ({
+            type: 'image',
+            image: image.base64,
+            ...(image.mimeType ? { mediaType: image.mimeType } : {}),
+          }) as ImagePart,
         ),
       ],
     }
@@ -842,7 +846,23 @@ export const createAgent = (
           if (part.type === 'image') {
             return {
               type: 'image',
-              source: { type: 'base64', media_type: 'image/jpeg', data: part.image },
+              source: { type: 'base64', media_type: part.mediaType || 'image/jpeg', data: part.image },
+            }
+          }
+          return part
+        })
+      }
+
+      // Serialize message content to OpenAI image_url format (for image support)
+      const serializeContentForOpenAI = (content: unknown): unknown => {
+        if (typeof content === 'string') return content
+        if (!Array.isArray(content)) return String(content)
+        return content.map((part: any) => {
+          if (part.type === 'image') {
+            const mimeType = part.mediaType || 'image/jpeg'
+            return {
+              type: 'image_url',
+              image_url: { url: `data:${mimeType};base64,${part.image}` },
             }
           }
           return part
@@ -887,7 +907,7 @@ export const createAgent = (
           model: modelConfig.modelId,
           messages: messages.map((m: any) => ({
             role: m.role,
-            content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+            content: serializeContentForOpenAI(m.content),
           })),
           stream: false,
         }

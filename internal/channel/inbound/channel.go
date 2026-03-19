@@ -1481,8 +1481,9 @@ func buildInputAttachments(attachments []channel.Attachment, dataRoot string, lo
 						slog.String("mimeType", mimeType))
 				}
 				out = append(out, conversation.InputAttachment{
-					Type:   "image",
-					Base64: base64.StdEncoding.EncodeToString(compressedData),
+					Type:     "image",
+					Base64:   base64.StdEncoding.EncodeToString(compressedData),
+					MimeType: mimeType,
 				})
 			}
 		case channel.AttachmentFile:
