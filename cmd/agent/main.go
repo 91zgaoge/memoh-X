@@ -78,6 +78,7 @@ import (
 	"github.com/Kxiandaoyan/Memoh-v2/internal/subagent"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/templates"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/version"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/workspace"
 )
 
 func main() {
@@ -92,7 +93,9 @@ func main() {
 
 			// containerd & mcp infrastructure
 			fx.Annotate(ctr.NewDefaultService, fx.As(new(ctr.Service))),
+			provideWorkspaceAdapter,
 			provideMCPManager,
+			provideWorkspaceManager,
 
 			// memory pipeline
 			provideMemoryLLM,
@@ -177,6 +180,7 @@ func main() {
 			provideServerHandler(handlers.NewChannelHandler),
 			provideServerHandler(provideUsersHandler),
 			provideServerHandler(handlers.NewMCPHandler),
+			provideServerHandler(provideMCPOAuthHandler),
 			provideServerHandler(provideMarketplaceHandler),
 			provideServerHandler(provideSharedFilesHandler),
 			provideServerHandler(templates.NewHandler),
@@ -319,6 +323,21 @@ func provideDBQueries(conn *pgxpool.Pool) *dbsqlc.Queries {
 
 func provideMCPManager(log *slog.Logger, service ctr.Service, cfg config.Config, conn *pgxpool.Pool) *mcp.Manager {
 	return mcp.NewManager(log, service, cfg.MCP, cfg.Containerd.Namespace, conn)
+}
+
+func provideWorkspaceAdapter(service ctr.Service) *ctr.WorkspaceAdapter {
+	ds, ok := service.(*ctr.DefaultService)
+	if !ok || ds == nil {
+		return nil
+	}
+	return ctr.NewWorkspaceAdapter(ds)
+}
+
+func provideWorkspaceManager(log *slog.Logger, adapter *ctr.WorkspaceAdapter, cfg config.Config, conn *pgxpool.Pool) *workspace.Manager {
+	if adapter == nil {
+		return nil
+	}
+	return workspace.NewManager(log, adapter, cfg.Workspace, cfg.Containerd.Namespace, conn)
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +596,8 @@ func provideToolGatewayService(lc fx.Lifecycle, log *slog.Logger, cfg config.Con
 	inboxExec := mcpinbox.NewExecutor(log, pool)
 
 	fedGateway := handlers.NewMCPFederationGateway(log, containerdHandler)
+	oauthService := mcp.NewOAuthService(log, queries, cfg.Server.Addr+"/api/mcp-oauth/callback")
+	fedGateway.SetOAuthService(oauthService)
 	fedSource := mcpfederation.NewSource(log, fedGateway, mcpConnService)
 
 	svc := mcp.NewToolGatewayService(
@@ -667,6 +688,11 @@ func provideTeamsHandler(log *slog.Logger, queries *dbsqlc.Queries, botService *
 
 func provideUnifiedToolsHandler(log *slog.Logger, builtinConfigService *mcp.BuiltinToolConfigService, mcpConnService *mcp.ConnectionService) *handlers.UnifiedToolsHandler {
 	return handlers.NewUnifiedToolsHandler(log, builtinConfigService, mcpConnService)
+}
+
+func provideMCPOAuthHandler(log *slog.Logger, mcpConnService *mcp.ConnectionService, botService *bots.Service, accountService *accounts.Service, queries *dbsqlc.Queries, cfg config.Config) *handlers.MCPOAuthHandler {
+	oauthService := mcp.NewOAuthService(log, queries, cfg.Server.Addr+"/api/mcp-oauth/callback")
+	return handlers.NewMCPOAuthHandler(log, oauthService, mcpConnService, botService, accountService)
 }
 
 // ---------------------------------------------------------------------------

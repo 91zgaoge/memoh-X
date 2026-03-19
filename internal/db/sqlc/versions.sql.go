@@ -7,6 +7,8 @@ package sqlc
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getVersionSnapshotID = `-- name: GetVersionSnapshotID :one
@@ -61,6 +63,51 @@ func (q *Queries) InsertVersion(ctx context.Context, arg InsertVersionParams) (C
 	return i, err
 }
 
+// ListVersionWithSnapshotRow is the result type for ListVersionsWithSnapshotByContainerID.
+type ListVersionWithSnapshotRow struct {
+	ID                  string             `json:"id"`
+	ContainerID         string             `json:"container_id"`
+	Version             int32              `json:"version"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	RuntimeSnapshotName string             `json:"runtime_snapshot_name"`
+	DisplayName         pgtype.Text        `json:"display_name"`
+}
+
+const listVersionsWithSnapshotByContainerID = `
+SELECT cv.id, cv.container_id, cv.version, cv.created_at, s.runtime_snapshot_name, s.display_name
+FROM container_versions cv
+JOIN snapshots s ON s.id = cv.snapshot_id
+WHERE cv.container_id = $1
+ORDER BY cv.version ASC
+`
+
+func (q *Queries) ListVersionsWithSnapshotByContainerID(ctx context.Context, containerID string) ([]ListVersionWithSnapshotRow, error) {
+	rows, err := q.db.Query(ctx, listVersionsWithSnapshotByContainerID, containerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVersionWithSnapshotRow
+	for rows.Next() {
+		var i ListVersionWithSnapshotRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ContainerID,
+			&i.Version,
+			&i.CreatedAt,
+			&i.RuntimeSnapshotName,
+			&i.DisplayName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVersionsByContainerID = `-- name: ListVersionsByContainerID :many
 SELECT id, container_id, snapshot_id, version, created_at FROM container_versions WHERE container_id = $1 ORDER BY version ASC
 `
@@ -100,4 +147,66 @@ func (q *Queries) NextVersion(ctx context.Context, containerID string) (int32, e
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+// ListSnapshotWithVersionRow is the result type for ListSnapshotsWithVersionByContainerID.
+type ListSnapshotWithVersionRow struct {
+	RuntimeSnapshotName string      `json:"runtime_snapshot_name"`
+	Source              string      `json:"source"`
+	DisplayName         pgtype.Text `json:"display_name"`
+	Version             pgtype.Int4 `json:"version"`
+}
+
+const listSnapshotsWithVersionByContainerID = `-- name: ListSnapshotsWithVersionByContainerID :many
+SELECT s.runtime_snapshot_name, s.source, s.display_name, cv.version
+FROM snapshots s
+LEFT JOIN container_versions cv ON cv.snapshot_id = s.id
+WHERE s.container_id = $1
+ORDER BY s.created_at ASC
+`
+
+func (q *Queries) ListSnapshotsWithVersionByContainerID(ctx context.Context, containerID string) ([]ListSnapshotWithVersionRow, error) {
+	rows, err := q.db.Query(ctx, listSnapshotsWithVersionByContainerID, containerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSnapshotWithVersionRow
+	for rows.Next() {
+		var i ListSnapshotWithVersionRow
+		if err := rows.Scan(
+			&i.RuntimeSnapshotName,
+			&i.Source,
+			&i.DisplayName,
+			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// GetVersionSnapshotRuntimeNameParams holds params for GetVersionSnapshotRuntimeName.
+type GetVersionSnapshotRuntimeNameParams struct {
+	ContainerID string `json:"container_id"`
+	Version     int32  `json:"version"`
+}
+
+const getVersionSnapshotRuntimeName = `-- name: GetVersionSnapshotRuntimeName :one
+SELECT s.runtime_snapshot_name
+FROM snapshots s
+JOIN container_versions cv ON cv.snapshot_id = s.id
+WHERE cv.container_id = $1 AND cv.version = $2
+LIMIT 1
+`
+
+func (q *Queries) GetVersionSnapshotRuntimeName(ctx context.Context, arg GetVersionSnapshotRuntimeNameParams) (string, error) {
+	row := q.db.QueryRow(ctx, getVersionSnapshotRuntimeName, arg.ContainerID, arg.Version)
+	var runtime_snapshot_name string
+	err := row.Scan(&runtime_snapshot_name)
+	return runtime_snapshot_name, err
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -24,6 +25,9 @@ const (
 	DefaultPGSSLMode        = "disable"
 	DefaultQdrantURL        = "http://127.0.0.1:6334"
 	DefaultQdrantCollection = "memory"
+	DefaultRuntimeDir       = "/opt/memoh/runtime"
+	DefaultCNIBinaryDir     = "/opt/cni/bin"
+	DefaultCNIConfigDir     = "/etc/cni/net.d"
 )
 
 type Config struct {
@@ -33,6 +37,7 @@ type Config struct {
 	Auth         AuthConfig         `toml:"auth"`
 	Containerd   ContainerdConfig   `toml:"containerd"`
 	MCP          MCPConfig          `toml:"mcp"`
+	Workspace    WorkspaceConfig    `toml:"workspace"`
 	Postgres     PostgresConfig     `toml:"postgres"`
 	Qdrant       QdrantConfig       `toml:"qdrant"`
 	AgentGateway AgentGatewayConfig `toml:"agent_gateway"`
@@ -71,6 +76,47 @@ type MCPConfig struct {
 	DataRoot           string `toml:"data_root"`
 	DataMount          string `toml:"data_mount"`
 	IdleTimeoutMinutes int    `toml:"idle_timeout_minutes"` // 0 = disabled
+}
+
+// WorkspaceConfig configures the workspace container system (v3 bridge architecture).
+type WorkspaceConfig struct {
+	Registry     string `toml:"registry"`
+	DefaultImage string `toml:"default_image"`
+	Snapshotter  string `toml:"snapshotter"`
+	DataRoot     string `toml:"data_root"`
+	CNIBinaryDir string `toml:"cni_bin_dir"`
+	CNIConfigDir string `toml:"cni_conf_dir"`
+	RuntimeDir   string `toml:"runtime_dir"`
+}
+
+// RuntimePath returns the path to the workspace runtime directory.
+func (c WorkspaceConfig) RuntimePath() string {
+	if c.RuntimeDir != "" {
+		return c.RuntimeDir
+	}
+	return DefaultRuntimeDir
+}
+
+// ImageRef returns the fully qualified image reference for the base image.
+func (c WorkspaceConfig) ImageRef() string {
+	img := c.DefaultImage
+	if img == "" {
+		return ""
+	}
+	return NormalizeImageRef(img)
+}
+
+// NormalizeImageRef ensures an image reference is fully qualified for containerd.
+func NormalizeImageRef(ref string) string {
+	firstSlash := strings.Index(ref, "/")
+	if firstSlash == -1 {
+		return "docker.io/library/" + ref
+	}
+	firstSegment := ref[:firstSlash]
+	if strings.ContainsAny(firstSegment, ".:") || firstSegment == "localhost" {
+		return ref
+	}
+	return "docker.io/" + ref
 }
 
 type PostgresConfig struct {

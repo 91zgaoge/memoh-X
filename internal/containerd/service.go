@@ -53,6 +53,9 @@ type CreateContainerRequest struct {
 	Snapshotter string
 	Labels      map[string]string
 	SpecOpts    []oci.SpecOpts
+	// Spec provides an alternative to SpecOpts for workspace containers.
+	// When non-empty, it is converted to oci.SpecOpts automatically.
+	Spec ContainerSpec
 }
 
 type DeleteContainerOptions struct {
@@ -255,6 +258,9 @@ func (s *DefaultService) CreateContainer(ctx context.Context, req CreateContaine
 	}
 	if len(req.SpecOpts) > 0 {
 		specOpts = append(specOpts, req.SpecOpts...)
+	}
+	if len(req.Spec.Cmd) > 0 || len(req.Spec.Mounts) > 0 || len(req.Spec.Env) > 0 {
+		specOpts = append(specOpts, containerSpecToSpecOpts(req.Spec)...)
 	}
 
 	containerOpts := []containerd.NewContainerOpts{
@@ -890,6 +896,9 @@ func (s *DefaultService) CreateContainerFromSnapshot(ctx context.Context, req Cr
 	}
 	if len(req.SpecOpts) > 0 {
 		specOpts = append(specOpts, req.SpecOpts...)
+	}
+	if len(req.Spec.Cmd) > 0 || len(req.Spec.Mounts) > 0 || len(req.Spec.Env) > 0 {
+		specOpts = append(specOpts, containerSpecToSpecOpts(req.Spec)...)
 	}
 
 	containerOpts := []containerd.NewContainerOpts{

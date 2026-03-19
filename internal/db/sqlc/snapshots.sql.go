@@ -58,6 +58,62 @@ WHERE container_id = $1
 ORDER BY created_at DESC
 `
 
+// upsertSnapshotInsert inserts a new snapshot by runtime_snapshot_name.
+// Uses a CTE to look up the parent snapshot ID by its runtime_snapshot_name.
+const upsertSnapshotInsert = `
+INSERT INTO snapshots (id, container_id, parent_snapshot_id, snapshotter, runtime_snapshot_name, source, display_name)
+SELECT
+  gen_random_uuid()::text,
+  $1,
+  (SELECT id FROM snapshots WHERE runtime_snapshot_name = $2 LIMIT 1),
+  $3,
+  $4,
+  $5,
+  $6
+ON CONFLICT (runtime_snapshot_name) WHERE runtime_snapshot_name != '' DO UPDATE
+  SET display_name = EXCLUDED.display_name,
+      source = EXCLUDED.source
+RETURNING id, container_id, parent_snapshot_id, snapshotter, digest, runtime_snapshot_name, source, display_name, created_at
+`
+
+// UpsertSnapshotParams holds parameters for UpsertSnapshot.
+type UpsertSnapshotParams struct {
+	ContainerID               string      `json:"container_id"`
+	ParentRuntimeSnapshotName pgtype.Text `json:"parent_runtime_snapshot_name"`
+	Snapshotter               string      `json:"snapshotter"`
+	RuntimeSnapshotName       string      `json:"runtime_snapshot_name"`
+	Source                    string      `json:"source"`
+	DisplayName               pgtype.Text `json:"display_name"`
+}
+
+func (q *Queries) UpsertSnapshot(ctx context.Context, arg UpsertSnapshotParams) (Snapshot, error) {
+	parentName := ""
+	if arg.ParentRuntimeSnapshotName.Valid {
+		parentName = arg.ParentRuntimeSnapshotName.String
+	}
+	row := q.db.QueryRow(ctx, upsertSnapshotInsert,
+		arg.ContainerID,
+		parentName,
+		arg.Snapshotter,
+		arg.RuntimeSnapshotName,
+		arg.Source,
+		arg.DisplayName,
+	)
+	var i Snapshot
+	err := row.Scan(
+		&i.ID,
+		&i.ContainerID,
+		&i.ParentSnapshotID,
+		&i.Snapshotter,
+		&i.Digest,
+		&i.RuntimeSnapshotName,
+		&i.Source,
+		&i.DisplayName,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 func (q *Queries) ListSnapshotsByContainerID(ctx context.Context, containerID string) ([]Snapshot, error) {
 	rows, err := q.db.Query(ctx, listSnapshotsByContainerID, containerID)
 	if err != nil {
