@@ -181,10 +181,10 @@ export const providerCatalog: Record<string, ProviderInfo> = {
   },
   'kimi-coding': {
     label: 'Kimi Code',
-    defaultBaseUrl: 'https://api.moonshot.cn/v1',
+    defaultBaseUrl: 'https://api.kimi.com/coding',
     models: [
-      { modelId: 'kimi-k2.5', name: 'Kimi K2.5', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: false },
-      { modelId: 'kimi-k2', name: 'Kimi K2', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: false },
+      { modelId: 'kimi-k2.5', name: 'Kimi K2.5', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: true },
+      { modelId: 'kimi-k2', name: 'Kimi K2', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: true },
     ],
   },
   volcengine: {

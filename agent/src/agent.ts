@@ -832,23 +832,72 @@ export const createAgent = (
 
     try {
       // Direct fetch to LLM API (bypass ai SDK due to Bun compatibility issues)
+      const isAnthropicFormat = (modelConfig as any).clientType === 'kimi-coding'
+
+      // Serialize message content to Anthropic content blocks format (for image support)
+      const serializeContentForAnthropic = (content: unknown): unknown => {
+        if (typeof content === 'string') return content
+        if (!Array.isArray(content)) return String(content)
+        return content.map((part: any) => {
+          if (part.type === 'image') {
+            return {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/jpeg', data: part.image },
+            }
+          }
+          return part
+        })
+      }
+
       console.log('[Agent stream] Starting fetch to', modelConfig.baseUrl)
-      const fetchUrl = `${modelConfig.baseUrl.replace(/\/$/, '')}/chat/completions`
-      console.log('[Agent stream] Fetch URL:', fetchUrl)
-      const response = await fetch(fetchUrl, {
-        method: 'POST',
-        headers: {
+
+      let fetchUrl: string
+      let fetchHeaders: Record<string, string>
+      let fetchBody: Record<string, unknown>
+
+      if (isAnthropicFormat) {
+        // Kimi Code uses Anthropic Messages API format
+        fetchUrl = `${modelConfig.baseUrl.replace(/\/$/, '')}/messages`
+        fetchHeaders = {
+          'Content-Type': 'application/json',
+          'x-api-key': modelConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          'X-Kimi-Client': 'kimi-cli',
+          'X-Kimi-Client-Version': '1.0.0',
+        }
+        const systemMsg = messages.find((m: any) => m.role === 'system')
+        const nonSystemMsgs = messages.filter((m: any) => m.role !== 'system')
+        fetchBody = {
+          model: modelConfig.modelId,
+          system: typeof systemMsg?.content === 'string' ? systemMsg.content : '',
+          messages: nonSystemMsgs.map((m: any) => ({
+            role: m.role,
+            content: serializeContentForAnthropic(m.content),
+          })),
+          max_tokens: 8192,
+        }
+      } else {
+        // Standard OpenAI Chat Completions API format
+        fetchUrl = `${modelConfig.baseUrl.replace(/\/$/, '')}/chat/completions`
+        fetchHeaders = {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${modelConfig.apiKey}`,
-        },
-        body: JSON.stringify({
+        }
+        fetchBody = {
           model: modelConfig.modelId,
           messages: messages.map((m: any) => ({
             role: m.role,
             content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
           })),
           stream: false,
-        }),
+        }
+      }
+
+      console.log('[Agent stream] Fetch URL:', fetchUrl)
+      const response = await fetch(fetchUrl, {
+        method: 'POST',
+        headers: fetchHeaders,
+        body: JSON.stringify(fetchBody),
       })
 
       if (!response.ok) {
@@ -858,7 +907,9 @@ export const createAgent = (
       }
 
       const data = await response.json()
-      const content = data.choices?.[0]?.message?.content || ''
+      const content = isAnthropicFormat
+        ? (data.content?.find((b: any) => b.type === 'text')?.text || '')
+        : (data.choices?.[0]?.message?.content || '')
 
       // Simulate streaming
       yield { type: 'text_start' }

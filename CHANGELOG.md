@@ -1,5 +1,93 @@
 # Memoh-v2 更新日志
 
+## [2026-03-19] Kimi Code 多模态支持修复
+
+### 问题
+kimi-coding provider 无法使用图片（多模态）能力，WeCom 发送图片时内容被损坏。
+
+### 根本原因
+1. `model-catalog.ts` 中 `defaultBaseUrl` 指向 `https://api.moonshot.cn/v1`（OpenAI-compatible），实际 Kimi Code 使用 **Anthropic Messages API**（`https://api.kimi.com/coding`）
+2. `agent.ts` 的 `stream()` 函数对非字符串 content 调用 `JSON.stringify()`，导致 `ImagePart` 数组被序列化为 JSON 字符串而非正确的 Anthropic base64 格式
+3. `model.ts` 使用 `createOpenAI` 而非 `createAnthropic`，`ask()` 路径也无法正确处理图片
+
+### 修复内容
+
+**`packages/web/src/data/model-catalog.ts`**:
+- `defaultBaseUrl`: `https://api.moonshot.cn/v1` → `https://api.kimi.com/coding`
+- `kimi-k2.5` / `kimi-k2` 的 `isMultimodal`: `false` → `true`
+
+**`agent/src/model.ts`**:
+- `ClientType.KimiCoding` case 从 `createOpenAI` 改为 `createAnthropic`
+- 保留 `X-Kimi-Client: kimi-cli` 自定义请求头
+
+**`agent/src/agent.ts`** (`stream()` 函数):
+- 新增 `isAnthropicFormat` 判断（`clientType === 'kimi-coding'`）
+- Anthropic 路径：endpoint 改为 `/messages`，认证头改为 `x-api-key`，新增 `anthropic-version: 2023-06-01`
+- 图片正确序列化：`{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: "..." } }`
+- 系统消息提取为顶级 `system` 字段
+- 响应解析从 `choices[0].message.content` 改为 `content[].text`
+
+### 参考
+- openclaw 项目（`/data2/openclaw`）验证了 kimi-coding 使用 Anthropic Messages API，`k2p5` 模型支持 `input: ["text", "image"]`
+- 详细文档: `docs/kimi-multimodal-support-2026-03-19.md`
+
+---
+
+## [2026-03-19] 扩展上下文窗口至 52.4万 + 优化图片处理
+
+### 扩展 LLM 上下文窗口
+**背景**: 图片对话时出现 `exceeds the available context size` 错误
+
+**修改 llama-server 配置**:
+- 上下文: 262,144 → **524,288 tokens** (2倍扩展)
+- KV cache 量化: q8_0 → **q4_0** (节省显存)
+
+**文件**: `/etc/systemd/system/llama-qwen35.service.d/override.conf`
+```bash
+-c 524288
+--cache-type-k q4_0
+--cache-type-v q4_0
+```
+
+**修复数据库配置**:
+```sql
+UPDATE models SET context_window = 524288
+WHERE model_id = 'Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf';
+```
+
+### 图片压缩优化
+**新增文件**: `internal/channel/inbound/image_compress.go`
+- 智能压缩策略：小图保留，大图压缩
+- 压缩至 1024x1024 @ 85% 质量
+- 超过 2MB 的图片二次压缩
+
+**调整压缩参数**:
+| 参数 | 原值 | 新值 |
+|-----|------|------|
+| 小图阈值 | 100KB | **500KB** |
+| 大图阈值 | 1MB | **2MB** |
+| 最大尺寸 | 768px | **1024px** |
+| JPEG 质量 | 80% | **85%** |
+
+### 消息历史限制调整
+**文件**: `internal/settings/types.go`
+- DM 对话: 50 → **20** 轮
+- 群聊对话: 30 → **12** 轮
+
+**文件**: `internal/conversation/flow/resolver.go`
+- Token 限制: 8万 → **25万**
+- 新增 `estimateMessageTokens()` 函数实时估算 token
+
+### 显存使用
+- 模型: ~20GB (双卡)
+- KV cache: ~2.9GB (52万上下文, 4-bit)
+- 总占用: ~42GB / 48GB
+
+### 文档
+- 详细文档: `/data2/memoh-v2/docs/adjust-for-524k-context-2026-03-19.md`
+
+---
+
 ## [2026-03-19] 修复删除按钮 & 优化思考动画
 
 ### 修复前端删除模型按钮
