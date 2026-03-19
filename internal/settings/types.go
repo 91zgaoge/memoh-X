@@ -3,11 +3,11 @@ package settings
 const (
 	DefaultMaxContextLoadTime = 24 * 60
 	DefaultLanguage           = "auto"
-	// Default history limits (in user turns) - REDUCED to prevent token explosion
-	// With 26k context window, we can only fit ~10-15 turns with moderate content
-	DefaultDMHistoryLimit        = 10 // DM conversations (reduced from 50)
-	DefaultChannelHistoryLimit   = 6  // Channel/Group conversations (reduced from 30)
-	DefaultEvolutionHistoryLimit = 10 // Evolution heartbeat (reduced from 50)
+	// Default history limits (in user turns) - tuned for 256K (262144 token) context window
+	// Token budget: ~150K for history; ~30K system prompt; ~30K response; ~10K overhead
+	DefaultDMHistoryLimit        = 10 // DM conversations
+	DefaultChannelHistoryLimit   = 6  // Channel/Group conversations
+	DefaultEvolutionHistoryLimit = 10 // Evolution heartbeat
 )
 
 type Settings struct {
