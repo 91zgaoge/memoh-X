@@ -22,49 +22,70 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /out/mcp ./cmd/mcp
 
 # ---- Stage 2: Assemble MCP image rootfs ----
-FROM alpine:latest AS mcp-rootfs
+FROM ubuntu:24.04 AS mcp-rootfs
 
 ARG TZ=UTC
 ENV TZ=${TZ}
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Base utilities + dumb-init (PID 1 init system to reap zombie processes)
-RUN apk add --no-cache grep curl bash tzdata gcompat dumb-init \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget bash tzdata dumb-init \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
-    && echo "${TZ}" > /etc/timezone
+    && echo "${TZ}" > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
-# Node.js + npm (provides npx for JS/TS MCP servers)
-RUN apk add --no-cache nodejs npm
+# Node.js 20 + npm (provides npx for JS/TS MCP servers)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 # Chromium + xvfb + dependencies (headless browser for agent-browser)
-RUN apk add --no-cache chromium libstdc++ harfbuzz nss freetype xvfb-run
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium-browser libstdc++6 libharfbuzz0b libnss3 libfreetype6 xvfb \
+    && rm -rf /var/lib/apt/lists/*
 
 # ClawHub CLI + agent-browser + actionbook (skills + browser + web operation manuals)
 RUN npm install -g clawhub agent-browser @actionbookdev/cli
+
+# agent-fetch for web content extraction
+RUN npm install -g @teng-lin/agent-fetch
+# Patch agent-fetch to allow corporate proxy (10.71.252.4)
+RUN AGENT_FETCH_PATH=$(npm root -g)/@teng-lin/agent-fetch && \
+    sed -i "s/function isPrivateIP(ip) {/function isPrivateIP(ip) { if (ip === '10.71.252.4') return false;/" "$AGENT_FETCH_PATH/dist/fetch/http-client.js"
+
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 # Python 3 + pip + uv (provides uvx for Python MCP servers)
-RUN apk add --no-cache python3 py3-pip && \
-    curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    ln -sf /root/.local/bin/uv /usr/local/bin/uv && \
-    ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
+    && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 
 # OpenViking context database (optional, enabled per-bot)
 # Needs build toolchain: Go+make for AGFS server, gcc/g++/cmake for pybind11 C++ extensions
 # Note: Build may fail due to network issues, making it optional
-RUN apk add --no-cache --virtual .ov-build-deps \
-        go make gcc g++ musl-dev python3-dev cmake git && \
-    (pip install --break-system-packages openviking || echo "openviking install failed, skipping") && \
-    apk del .ov-build-deps || true
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    golang-go make gcc g++ python3-dev cmake git \
+    && pip install openviking || echo "openviking install failed, skipping" \
+    && apt-get purge -y golang-go make gcc g++ python3-dev cmake git \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=mcp-builder /out/mcp /opt/mcp
 COPY cmd/mcp/template /opt/mcp-template
 
 # Use dumb-init wrapper script for proper zombie process reaping
+# Includes public DNS config for CNI networks (host DNS may not be reachable from bridge network)
 RUN printf '#!/bin/sh\n\
-[ -e /app/mcp ] || { mkdir -p /app; [ -f /opt/mcp ] && cp -a /opt/mcp /app/mcp 2>/dev/null || true; }\n\
+[ -e /app/mcp ] || { mkdir -p /app; [ -f /opt/mcp ] \&\& cp -a /opt/mcp /app/mcp 2>/dev/null || true; }\n\
 [ -d /tmp ] || mkdir -p /tmp\n\
 chmod 1777 /tmp 2>/dev/null || true\n\
+# Configure public DNS for CNI networks (host DNS often not reachable from container bridge)\n\
+printf "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n" > /etc/resolv.conf 2>/dev/null || true\n\
 if [ -x /app/mcp ]; then exec /app/mcp "$@"; fi\n\
 exec /opt/mcp "$@"\n' > /opt/entrypoint-inner.sh && chmod +x /opt/entrypoint-inner.sh && \
 \
@@ -73,9 +94,8 @@ exec /usr/bin/dumb-init -- /opt/entrypoint-inner.sh "$@"\n' > /opt/entrypoint.sh
 
 # Create rootfs tar excluding pseudo-filesystems
 RUN tar -cf /tmp/rootfs.tar \
-    --exclude='./proc' --exclude='./sys' --exclude='./dev' \
-    --exclude='./run' \
-    -C / .
+        --exclude=proc --exclude=sys --exclude=dev --exclude=run \
+        -C / .
 
 # ---- Stage 3: Package rootfs as Docker image tar ----
 FROM alpine:latest AS oci-exporter

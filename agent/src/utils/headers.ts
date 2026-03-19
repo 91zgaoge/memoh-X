@@ -1,8 +1,9 @@
 import { AgentAuthContext, IdentityContext } from '../types'
 
 export const buildIdentityHeaders = (identity: IdentityContext, auth: AgentAuthContext, reqId?: string) => {
+  // auth.bearer already includes "Bearer " prefix from server
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${auth.bearer}`,
+    Authorization: auth.bearer.startsWith('Bearer ') ? auth.bearer : `Bearer ${auth.bearer}`,
   }
   if (identity.channelIdentityId) {
     headers['X-Memoh-Channel-Identity-Id'] = identity.channelIdentityId

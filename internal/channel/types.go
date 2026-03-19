@@ -125,6 +125,7 @@ type StreamOptions struct {
 	Reply           *ReplyRef      `json:"reply,omitempty"`
 	SourceMessageID string         `json:"source_message_id,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
+	ReceivedAt      time.Time      `json:"received_at,omitempty"` // 消息接收时间，用于计算对话总耗时
 }
 
 // MessageFormat indicates how the message text should be rendered.

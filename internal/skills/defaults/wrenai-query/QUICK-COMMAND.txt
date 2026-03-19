@@ -1,0 +1,50 @@
+# WrenAI Query - 直接复制粘贴使用
+# 不要修改，不要思考，直接复制粘贴执行
+
+## 使用方法
+
+### 步骤 1: 复制下面这行命令（根据用户的问题修改引号内的内容）
+
+sh "/data/.skills/wrenai-query/scripts/wrenai" "查询上个月江西省的KPI指标" pg
+
+### 步骤 2: 将命令中的查询内容替换为用户的问题
+
+### 步骤 3: 执行命令，等待 JSON 结果返回
+
+---
+
+## ⚠️ 警告：不要这样做！
+
+❌ 不要自己调用 WrenAI API
+❌ 不要自己写代码执行 SQL
+❌ 不要尝试安装 psycopg2
+❌ 不要解析这个文件然后自己实现逻辑
+
+---
+
+## ✅ 正确的完整流程示例
+
+# 用户问："查询上个月江西省的KPI指标"
+# 执行：
+result=$(sh "/data/.skills/wrenai-query/scripts/wrenai" "查询上个月江西省的KPI指标" pg 2>/dev/null)
+# 解析结果：
+echo "$result" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+if d.get('success') and d.get('execution_success'):
+    print('查询成功！')
+    print('SQL:', d.get('sql', '')[:100])
+    print('数据行数:', d.get('results', {}).get('total_rows', 0))
+    for r in d.get('results', {}).get('records', [])[:3]:
+        print(r)
+else:
+    print('查询失败:', d.get('error', {}).get('message', '未知错误'))
+"
+
+---
+
+## 数据库实例选项
+
+pg    - PostgreSQL (CBNBI 业务数据，默认)
+mssql - MSSQL 泛微系统
+hr    - MSSQL 宏景 HR 系统

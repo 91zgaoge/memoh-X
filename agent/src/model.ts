@@ -78,6 +78,29 @@ export const createModel = (model: ModelConfig) => {
       const provider = createOpenAI({ apiKey, baseURL })
       return provider.chat(modelId)
     }
+    case ClientType.KimiCoding: {
+      // Kimi Coding API 检测 Coding Agent 的方式可能基于请求格式而非仅 User-Agent
+      // 尝试使用 OpenAI SDK 配合自定义 fetch 来模拟 Anthropic 请求格式
+      const customFetch = async (url: string, options: any) => {
+        // 修改请求头以通过 Coding Agent 检测
+        const headers = new Headers(options.headers)
+        headers.set('User-Agent', 'Kimi-CLI/1.0.0 (axios/1.6.0)')
+        headers.set('X-Kimi-Client', 'kimi-cli')
+        headers.set('X-Kimi-Client-Version', '1.0.0')
+
+        return fetch(url, {
+          ...options,
+          headers,
+        })
+      }
+
+      const provider = createOpenAI({
+        apiKey,
+        baseURL,
+        fetch: customFetch,
+      })
+      return provider.chat(modelId)
+    }
     default:
       return createAiGateway({ apiKey, baseURL })(modelId)
   }

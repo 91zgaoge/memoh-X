@@ -287,6 +287,7 @@ func (q *Queries) GetModelByID(ctx context.Context, id pgtype.UUID) (Model, erro
 		&i.FallbackModelID,
 		&i.Reasoning,
 		&i.MaxTokens,
+		&i.EnableTokenEstimate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -312,6 +313,7 @@ func (q *Queries) GetModelByModelID(ctx context.Context, modelID string) (Model,
 		&i.FallbackModelID,
 		&i.Reasoning,
 		&i.MaxTokens,
+		&i.EnableTokenEstimate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -339,6 +341,7 @@ func (q *Queries) GetModelFallback(ctx context.Context, primaryModelID pgtype.UU
 		&i.FallbackModelID,
 		&i.Reasoning,
 		&i.MaxTokens,
+		&i.EnableTokenEstimate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

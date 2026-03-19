@@ -58,6 +58,14 @@ WRENAI_PG_URL="${WRENAI_PG_URL:-http://${WRENAI_HOST}:5555}"
 WRENAI_MSSQL_URL="${WRENAI_MSSQL_URL:-http://${WRENAI_HOST}:6555}"
 WRENAI_HR_URL="${WRENAI_HR_URL:-http://${WRENAI_HOST}:7555}"
 
+# Default WrenUI instance URLs (for SQL execution)
+WRENUI_PG_URL="${WRENUI_PG_URL:-http://${WRENAI_HOST}:3000}"
+WRENUI_MSSQL_URL="${WRENUI_MSSQL_URL:-http://${WRENAI_HOST}:4000}"
+WRENUI_HR_URL="${WRENUI_HR_URL:-http://${WRENAI_HOST}:5000}"
+
+# Default limit for SQL execution results
+WRENAI_QUERY_LIMIT="${WRENAI_QUERY_LIMIT:-500}"
+
 # Colors for output (disabled if not terminal)
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
@@ -92,6 +100,10 @@ Environment Variables:
   WRENAI_PG_URL      PostgreSQL instance URL (default: http://localhost:5555)
   WRENAI_MSSQL_URL   MSSQL instance URL (default: http://localhost:6555)
   WRENAI_HR_URL      HR instance URL (default: http://localhost:7555)
+  WRENUI_PG_URL      WrenUI PostgreSQL URL for SQL execution (default: http://localhost:3000)
+  WRENUI_MSSQL_URL   WrenUI MSSQL URL for SQL execution (default: http://localhost:4000)
+  WRENUI_HR_URL      WrenUI HR URL for SQL execution (default: http://localhost:5000)
+  WRENAI_QUERY_LIMIT Max rows to return from SQL execution (default: 500)
 EOF
 }
 
@@ -127,6 +139,51 @@ get_instance_url() {
             exit 1
             ;;
     esac
+}
+
+# Function: Get WrenUI URL for SQL execution
+get_wrenui_url() {
+    local instance="${1:-pg}"
+    case "$instance" in
+        pg|postgresql|postgres)
+            echo "$WRENUI_PG_URL"
+            ;;
+        mssql|fanwei|sqlserver)
+            echo "$WRENUI_MSSQL_URL"
+            ;;
+        hr|hongjing)
+            echo "$WRENUI_HR_URL"
+            ;;
+        *)
+            echo "$WRENUI_PG_URL"
+            ;;
+    esac
+}
+
+# Function: Execute SQL via WrenUI API
+execute_sql() {
+    local ui_url="$1"
+    local sql="$2"
+    local limit="${3:-$WRENAI_QUERY_LIMIT}"
+
+    local run_sql_url="${ui_url}/api/v1/run_sql"
+
+    # Escape SQL for JSON
+    local escaped_sql
+    escaped_sql=$(echo "$sql" | jq -Rs '.[:-1]')
+
+    local request_body="{\"sql\": $escaped_sql, \"limit\": $limit}"
+
+    local response
+    response=$(curl -sf --max-time 60 -X POST \
+        -H "Content-Type: application/json" \
+        -d "$request_body" \
+        "$run_sql_url" 2>&1) || {
+        echo "null"
+        return 1
+    }
+
+    echo "$response"
 }
 
 # Function: Check WrenAI health
@@ -301,6 +358,7 @@ poll_results() {
 format_results() {
     local response="$1"
     local query="$2"
+    local ui_url="${3:-}"
 
     # Check if response is valid JSON
     if ! echo "$response" | jq -e . &> /dev/null; then
@@ -325,29 +383,93 @@ EOF
         return 1
     fi
 
-    # Extract SQL
+    # Extract SQL from response array
     local sql
-    sql=$(echo "$response" | jq -r '.sql // .generated_sql // empty')
+    sql=$(echo "$response" | jq -r '.response[0].sql // .sql // .generated_sql // empty')
 
-    # Extract results
-    local results
-    results=$(echo "$response" | jq '.results // .data // empty')
+    if [[ -z "$sql" || "$sql" == "null" ]]; then
+        cat << EOF
+{
+  "success": false,
+  "error": {
+    "code": "NO_SQL_GENERATED",
+    "message": "WrenAI did not generate any SQL for this query"
+  }
+}
+EOF
+        return 1
+    fi
 
-    # Extract analysis/answer
+    # Execute SQL to get actual results
+    local execution_result="null"
+    local execution_error=""
+    local execution_success=false
+
+    if [[ -n "$ui_url" ]]; then
+        echo -e "${BLUE}▶️  Executing SQL via WrenUI...${NC}" >&2
+        local exec_response
+        exec_response=$(execute_sql "$ui_url" "$sql" "$WRENAI_QUERY_LIMIT")
+
+        if [[ "$exec_response" != "null" ]]; then
+            # Check if execution returned valid results
+            if echo "$exec_response" | jq -e '.records' &> /dev/null; then
+                execution_result="$exec_response"
+                execution_success=true
+                echo -e "${GREEN}✅ SQL executed successfully${NC}" >&2
+            else
+                # Extract error message
+                execution_error=$(echo "$exec_response" | jq -r '.message // .error // "Unknown execution error"')
+                echo -e "${YELLOW}⚠️  SQL execution warning: $execution_error${NC}" >&2
+            fi
+        else
+            echo -e "${YELLOW}⚠️  Could not execute SQL (WrenUI may not be available)${NC}" >&2
+        fi
+    fi
+
+    # Extract analysis/answer from reasoning fields
     local analysis
-    analysis=$(echo "$response" | jq -r '.analysis // .answer // .response // empty')
+    analysis=$(echo "$response" | jq -r '.sql_generation_reasoning // .intent_reasoning // empty')
 
     # Build output
-    cat << EOF
+    if [[ "$execution_success" == true ]]; then
+        # Parse execution results
+        local records
+        local columns
+        local total_rows
+        records=$(echo "$execution_result" | jq '.records // []')
+        columns=$(echo "$execution_result" | jq '.columns // []')
+        total_rows=$(echo "$execution_result" | jq -r '.totalRows // 0')
+
+        cat << EOF
 {
   "success": true,
   "query": $(echo "$query" | jq -Rs .),
-  "sql": $(echo "${sql:-N/A}" | jq -Rs .),
-  "results": ${results:-null},
+  "sql": $(echo "$sql" | jq -Rs .),
+  "results": {
+    "records": $records,
+    "columns": $columns,
+    "total_rows": $total_rows
+  },
+  "execution_success": true,
   "analysis": $(echo "${analysis:-N/A}" | jq -Rs .),
   "raw_response": $response
 }
 EOF
+    else
+        # Return without execution results
+        cat << EOF
+{
+  "success": true,
+  "query": $(echo "$query" | jq -Rs .),
+  "sql": $(echo "$sql" | jq -Rs .),
+  "results": null,
+  "execution_success": false,
+  "execution_error": $(echo "${execution_error:-SQL execution not available}" | jq -Rs .),
+  "analysis": $(echo "${analysis:-N/A}" | jq -Rs .),
+  "raw_response": $response
+}
+EOF
+    fi
 }
 
 # Main function
@@ -420,8 +542,12 @@ EOF
         exit 1
     fi
 
+    # Get WrenUI URL for SQL execution
+    local ui_url
+    ui_url=$(get_wrenui_url "$instance")
+
     # Format and output results
-    format_results "$results" "$query"
+    format_results "$results" "$query" "$ui_url"
 }
 
 # Run main function

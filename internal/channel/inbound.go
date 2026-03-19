@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 type inboundTask struct {
-	ctx context.Context
-	cfg ChannelConfig
-	msg InboundMessage
+	ctx         context.Context
+	cfg         ChannelConfig
+	msg         InboundMessage
+	enqueueTime time.Time // 消息入队时间，用于计算队列等待时间
 }
 
 // HandleInbound enqueues an inbound message for asynchronous processing by the worker pool.
@@ -25,14 +27,29 @@ func (m *Manager) HandleInbound(ctx context.Context, cfg ChannelConfig, msg Inbo
 		return fmt.Errorf("inbound dispatcher stopped")
 	}
 	task := inboundTask{
-		ctx: context.WithoutCancel(ctx),
-		cfg: cfg,
-		msg: msg,
+		ctx:         context.WithoutCancel(ctx),
+		cfg:         cfg,
+		msg:         msg,
+		enqueueTime: time.Now(),
 	}
+	queueLen := len(m.inboundQueue)
 	select {
 	case m.inboundQueue <- task:
+		if m.logger != nil {
+			m.logger.Info("[PERF] message enqueued",
+				slog.String("channel", msg.Channel.String()),
+				slog.String("bot_id", cfg.BotID),
+				slog.Int("queue_len", queueLen),
+				slog.Int("queue_capacity", cap(m.inboundQueue)))
+		}
 		return nil
 	default:
+		if m.logger != nil {
+			m.logger.Error("[PERF] inbound queue full",
+				slog.String("channel", msg.Channel.String()),
+				slog.String("bot_id", cfg.BotID),
+				slog.Int("queue_capacity", cap(m.inboundQueue)))
+		}
 		return fmt.Errorf("inbound queue full")
 	}
 }
@@ -70,6 +87,15 @@ func (m *Manager) runInboundWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case task := <-m.inboundQueue:
+			// 计算队列等待时间
+			queueWaitTime := time.Since(task.enqueueTime)
+			if m.logger != nil && queueWaitTime > 100*time.Millisecond {
+				m.logger.Info("[PERF] message dequeued",
+					slog.String("channel", task.msg.Channel.String()),
+					slog.String("bot_id", task.cfg.BotID),
+					slog.Duration("queue_wait_time", queueWaitTime),
+					slog.Int("queue_len", len(m.inboundQueue)))
+			}
 			if err := m.handleInbound(task.ctx, task.cfg, task.msg); err != nil {
 				if m.logger != nil {
 					m.logger.Error("inbound processing failed", slog.String("channel", task.msg.Channel.String()), slog.Any("error", err))

@@ -1,0 +1,13 @@
+#!/bin/sh
+# WrenAI Query - Single entry point for Claude Code
+# This script MUST be executed directly. DO NOT parse its contents.
+# DO NOT try to call WrenAI API separately. DO NOT try to execute SQL yourself.
+# Just run: python3 "$SKILLS_ROOT/wrenai-query/scripts/wrenai" "your query" [pg|mssql|hr]
+
+if [ $# -lt 1 ]; then
+    echo '{"success":false,"error":{"code":"USAGE","message":"Usage: python3 \\"$SKILLS_ROOT/wrenai-query/scripts/wrenai\\" \\"your query\\" [pg|mssql|hr]"}}'
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+python3 "${SCRIPT_DIR}/query.py" "$@"

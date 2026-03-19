@@ -34,9 +34,9 @@ const (
 	// Max missed pong before reconnect
 	MaxMissedPong = 3
 
-	// Reply ack timeout - 与 SDK 保持一致为 5 秒
-	// SDK (ws.ts:55) 使用 5000ms，我们保持一致以确保可靠性
-	ReplyAckTimeout = 5 * time.Second
+	// Reply ack timeout - 缩短为 3 秒以加快响应
+	// WeCom 通常响应很快，3 秒足够，超时后继续处理队列
+	ReplyAckTimeout = 3 * time.Second
 
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
@@ -482,16 +482,20 @@ func (c *WebSocketClient) handleReplyAck(reqID string, frame WebsocketMessage, p
 
 	queue := c.replyQueues[reqID]
 
+	ackReceiveTime := time.Now()
 	if frame.ErrCode != 0 {
-		c.logger.Warn("reply ack error",
+		c.logger.Warn("[PERF] reply ack error",
 			slog.String("req_id", reqID),
 			slog.Int("errcode", frame.ErrCode),
-			slog.String("errmsg", frame.ErrMsg))
+			slog.String("errmsg", frame.ErrMsg),
+			slog.Time("ack_time", ackReceiveTime))
 		if queue != nil && len(queue) > 0 {
 			queue[0].Reject(fmt.Errorf("reply failed: %s (code: %d)", frame.ErrMsg, frame.ErrCode))
 		}
 	} else {
-		c.logger.Debug("reply ack received", slog.String("req_id", reqID))
+		c.logger.Info("[PERF] reply ack received",
+			slog.String("req_id", reqID),
+			slog.Time("ack_time", ackReceiveTime))
 		if queue != nil && len(queue) > 0 {
 			queue[0].Resolve(frame)
 		}
@@ -758,6 +762,9 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 // processReplyQueue processes the reply queue for a specific req_id
 // All messages wait for ACK before continuing to ensure delivery and order.
 func (c *WebSocketClient) processReplyQueue(reqID string) {
+	// [PERF] 记录队列处理开始时间
+	processStartTime := time.Now()
+
 	c.queueMu.Lock()
 	queue, exists := c.replyQueues[reqID]
 	if !exists || len(queue) == 0 {
@@ -766,7 +773,12 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		return
 	}
 	item := queue[0]
+	queueLen := len(queue)
 	c.queueMu.Unlock()
+
+	c.logger.Info("[PERF] processing reply queue",
+		slog.String("req_id", reqID),
+		slog.Int("queue_len", queueLen))
 
 	c.mu.RLock()
 	conn := c.conn
@@ -787,6 +799,7 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 	}
 
 	// Send the frame
+	sendTime := time.Now()
 	if err := conn.WriteJSON(item.Frame); err != nil {
 		c.logger.Error("failed to send reply", slog.String("req_id", reqID), slog.Any("error", err))
 		item.Reject(fmt.Errorf("write reply: %w", err))
@@ -802,8 +815,13 @@ func (c *WebSocketClient) processReplyQueue(reqID string) {
 		c.queueMu.Unlock()
 		return
 	}
+	sendElapsed := time.Since(sendTime)
 
-	c.logger.Debug("reply sent, waiting for ack", slog.String("req_id", reqID), slog.String("cmd", item.Frame.Cmd))
+	c.logger.Info("[PERF] reply sent, waiting for ack",
+		slog.String("req_id", reqID),
+		slog.String("cmd", item.Frame.Cmd),
+		slog.Duration("send_elapsed", sendElapsed),
+		slog.Duration("queue_process_time", time.Since(processStartTime)))
 
 	// Set up timeout
 	timer := time.AfterFunc(ReplyAckTimeout, func() {

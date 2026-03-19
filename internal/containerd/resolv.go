@@ -61,9 +61,9 @@ func ResolveConfSource(dataDir string) (string, error) {
 	return createFallbackResolv(dataDir)
 }
 
-// copyResolvConf copies a resolv.conf file to dataDir, filtering out localhost addresses.
+// copyResolvConf copies a resolv.conf file to dataDir, filtering out localhost and private IP addresses.
 // This is needed because systemd-resolved's resolv.conf might be on a different filesystem
-// or contain localhost addresses that won't work in bot containers.
+// or contain addresses that won't work for bot containers (localhost or private IPs not reachable from CNI network).
 func copyResolvConf(srcPath, dataDir string) (string, error) {
 	content, err := os.ReadFile(srcPath)
 	if err != nil {
@@ -74,16 +74,21 @@ func copyResolvConf(srcPath, dataDir string) (string, error) {
 		return "", err
 	}
 
-	// Filter out localhost addresses (127.0.0.53, 127.0.0.1, ::1)
+	// Filter out localhost and private IP addresses (not reachable from CNI network)
 	var filteredLines []string
 	scanner := bufio.NewScanner(strings.NewReader(string(content)))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		// Skip localhost nameservers
+		// Skip localhost and private IP nameservers
 		if strings.HasPrefix(line, "nameserver ") {
 			ns := strings.TrimPrefix(line, "nameserver ")
 			ns = strings.TrimSpace(ns)
+			// Skip localhost addresses
 			if strings.HasPrefix(ns, "127.") || ns == "::1" {
+				continue
+			}
+			// Skip private IP ranges (not reachable from CNI network)
+			if isPrivateIP(ns) {
 				continue
 			}
 		}
@@ -139,9 +144,14 @@ func filterDockerDNS(resolvPath, dataDir string) (string, error) {
 			ns := strings.TrimPrefix(line, "nameserver ")
 			ns = strings.TrimSpace(ns)
 			// Skip localhost addresses (Docker internal DNS)
-			if !strings.HasPrefix(ns, "127.") && ns != "::1" {
-				nameservers = append(nameservers, ns)
+			if strings.HasPrefix(ns, "127.") || ns == "::1" {
+				continue
 			}
+			// Skip private IP addresses (not reachable from CNI network)
+			if isPrivateIP(ns) {
+				continue
+			}
+			nameservers = append(nameservers, ns)
 			continue
 		}
 
@@ -184,6 +194,8 @@ func filterDockerDNS(resolvPath, dataDir string) (string, error) {
 
 // extractExtServers parses Docker's ExtServers comment to extract real DNS servers.
 // Example: "# ExtServers: [host(127.0.0.53)]" -> ["127.0.0.53"]
+// Example: "# ExtServers: [host(10.10.10.10) host(223.5.5.5)]" -> ["223.5.5.5"] (10.10.10.10 filtered as private)
+// Filters out private IPs that are not reachable from CNI networks.
 func extractExtServers(line string) []string {
 	var servers []string
 	// Find content between [ and ]
@@ -194,14 +206,18 @@ func extractExtServers(line string) []string {
 	}
 
 	content := line[start+1 : end]
-	// Split by comma and extract host(...) entries
-	parts := strings.Split(content, ",")
+	// Split by space or comma and extract host(...) entries
+	// Docker uses space-separated: [host(10.10.10.10) host(223.5.5.5)]
+	parts := strings.FieldsFunc(content, func(r rune) bool {
+		return r == ' ' || r == ','
+	})
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if strings.HasPrefix(part, "host(") && strings.HasSuffix(part, ")") {
 			server := part[5 : len(part)-1] // Extract content between host( and )
 			server = strings.TrimSpace(server)
-			if server != "" {
+			// Skip empty, localhost, and private IP addresses
+			if server != "" && !strings.HasPrefix(server, "127.") && !isPrivateIP(server) {
 				servers = append(servers, server)
 			}
 		}
@@ -225,6 +241,39 @@ func createFallbackResolv(dataDir string) (string, error) {
 		return "", err
 	}
 	return fallbackPath, nil
+}
+
+// isPrivateIP checks if an IP address is in a private range.
+// Private IPs are not reachable from CNI networks, so we filter them out
+// and use public DNS servers instead.
+func isPrivateIP(ip string) bool {
+	// IPv4 private ranges
+	privatePrefixes := []string{
+		"10.",     // 10.0.0.0/8
+		"172.16.", // 172.16.0.0/12 - note: covers 172.16-31
+		"172.17.",
+		"172.18.",
+		"172.19.",
+		"172.20.",
+		"172.21.",
+		"172.22.",
+		"172.23.",
+		"172.24.",
+		"172.25.",
+		"172.26.",
+		"172.27.",
+		"172.28.",
+		"172.29.",
+		"172.30.",
+		"172.31.",
+		"192.168.", // 192.168.0.0/16
+	}
+	for _, prefix := range privatePrefixes {
+		if strings.HasPrefix(ip, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func limaFileExists(path string) (bool, error) {

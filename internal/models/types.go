@@ -55,6 +55,7 @@ const (
 	ClientTypeXiaomi          ClientType = "xiaomi"
 	ClientTypeLongcat         ClientType = "longcat"
 	ClientTypeModelScope      ClientType = "modelscope"
+	ClientTypeKimiCoding      ClientType = "kimi-coding"
 )
 
 type Model struct {

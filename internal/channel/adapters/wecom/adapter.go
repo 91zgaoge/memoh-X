@@ -240,24 +240,65 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 		streamID = generateStreamID()
 	}
 
-	// Use stream format for thinking reply (same as final response)
-	// CRITICAL: Must use the same streamID as the actual response to update the same message
+	// CRITICAL FIX: Send thinking reply immediately without queuing or ACK wait
+	// This ensures we respond within the 5-second ACK window to prevent interruption
+	a.sendThinkingWithAnimation(ctx, wsClient, reqID, streamID)
+}
+
+// sendThinkingWithAnimation sends an animated "thinking" message with wave effect dots
+// The dots animate like a wave: . → .. → ...
+func (a *Adapter) sendThinkingWithAnimation(ctx context.Context, wsClient *WebSocketClient, reqID string, streamID string) {
+	// Animation frames for the dots
+	frames := []string{".", "..", "..."}
+	frameIndex := 0
+
+	// Send first frame immediately
+	a.sendThinkingFrame(wsClient, reqID, streamID, "⏳ 正在思考中"+frames[frameIndex])
+
+	// Start animation goroutine
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond) // Update every 500ms
+		defer ticker.Stop()
+
+		// Maximum animation duration (30 seconds), then stop to prevent infinite loop
+		maxDuration := 30 * time.Second
+		timeout := time.After(maxDuration)
+
+		for {
+			select {
+			case <-ticker.C:
+				frameIndex = (frameIndex + 1) % len(frames)
+				content := "⏳ 正在思考中" + frames[frameIndex]
+				if err := a.sendThinkingFrame(wsClient, reqID, streamID, content); err != nil {
+					// Stop animation if send fails (message likely already updated)
+					return
+				}
+			case <-ctx.Done():
+				// Context cancelled, stop animation
+				return
+			case <-timeout:
+				// Max duration reached, stop animation
+				a.logger.Debug("thinking animation timeout reached", slog.String("req_id", reqID), slog.String("stream_id", streamID))
+				return
+			}
+		}
+	}()
+}
+
+// sendThinkingFrame sends a single thinking frame
+func (a *Adapter) sendThinkingFrame(wsClient *WebSocketClient, reqID string, streamID string, content string) error {
 	thinkingBody := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
 			ID:      streamID,
-			Finish:  false, // Not finished, will be updated with final response
-			Content: "思考中...",
+			Finish:  false,
+			Content: content,
 		},
 	}
 
-	// CRITICAL FIX: Send thinking reply immediately without queuing or ACK wait
-	// This ensures we respond within the 5-second ACK window to prevent interruption
-	// The thinking reply is best-effort; if it fails, we continue processing anyway
 	bodyBytes, err := json.Marshal(thinkingBody)
 	if err != nil {
-		a.logger.Debug("failed to marshal thinking reply", slog.Any("error", err))
-		return
+		return err
 	}
 
 	frame := WebsocketMessage{
@@ -266,12 +307,7 @@ func (a *Adapter) sendThinkingReply(ctx context.Context, wsClient *WebSocketClie
 		Body:    bodyBytes,
 	}
 
-	// Send directly without queuing - fire and forget
-	if err := wsClient.sendFrame(frame); err != nil {
-		a.logger.Debug("failed to send thinking reply", slog.Any("error", err))
-	} else {
-		a.logger.Info("thinking reply sent", slog.String("req_id", reqID), slog.String("stream_id", streamID))
-	}
+	return wsClient.sendFrame(frame)
 }
 
 // sendErrorReply sends an error response to cover the "thinking..." message
@@ -427,7 +463,7 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 		slog.Bool("is_mentioned", isMentioned),
 		slog.String("bot_id", cfg.BotID))
 
-	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, streamID, a.logger, cmd), nil
+	return NewOutboundStream(a, cfg, wsClient, reqID, chatID, userID, chatType, isMentioned, streamID, a.logger, opts.ReceivedAt, cmd), nil
 }
 
 // Send sends a message directly (non-streaming)
@@ -797,6 +833,10 @@ func (a *Adapter) handleWebSocketMessage(ctx context.Context, cfg channel.Channe
 
 // handleMessageCallback processes message callbacks
 func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.ChannelConfig, config *Config, handler channel.InboundHandler, wsMsg *WebsocketMessage) error {
+	// [PERF] 记录消息处理开始时间
+	processingStartTime := time.Now()
+	reqID := wsMsg.Headers.ReqID
+
 	var body MsgCallbackBody
 	if err := json.Unmarshal(wsMsg.Body, &body); err != nil {
 		return fmt.Errorf("unmarshal message body: %w", err)
@@ -1000,7 +1040,13 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 				// Send immediate "thinking" reply for better UX
 				// CRITICAL: Generate streamID here and pass to both thinking reply and handler
 				streamID := generateStreamID()
+				// [PERF] 记录发送 thinking 回复前的时间
+				thinkingStartTime := time.Now()
 				a.sendThinkingReply(ctx, wsClient, wsMsg.Headers.ReqID, streamID)
+				a.logger.Info("[PERF] thinking reply sent",
+					slog.String("req_id", reqID),
+					slog.Duration("time_since_receive", time.Since(processingStartTime)),
+					slog.Duration("thinking_send_time", time.Since(thinkingStartTime)))
 				// Store streamID in message metadata so CreateOutboundStream can use it
 				msg.Metadata["stream_id"] = streamID
 				a.logger.Info("[MSG_ROUTE] calling handler for text message",
@@ -1010,6 +1056,7 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 					slog.String("reply_target", msg.ReplyTarget),
 					slog.String("content_preview", truncateString(content, 100)))
 				err := handler(ctx, cfg, msg)
+				totalProcessingTime := time.Since(processingStartTime)
 				if err != nil {
 					a.logger.Error("[MSG_ROUTE] handler returned error",
 						slog.String("req_id", wsMsg.Headers.ReqID),
@@ -1022,7 +1069,8 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 					a.logger.Info("[MSG_ROUTE] handler completed successfully",
 						slog.String("req_id", wsMsg.Headers.ReqID),
 						slog.String("from_user_id", body.From.UserID),
-						slog.String("reply_target", msg.ReplyTarget))
+						slog.String("reply_target", msg.ReplyTarget),
+						slog.Duration("[PERF] total_processing_time", totalProcessingTime))
 				}
 				return err
 			}

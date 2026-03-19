@@ -225,6 +225,14 @@ func (h *ContainerdHandler) CreateContainer(c echo.Context) error {
 	h.ensureBotSharedOutputDir(ctx, sharedDir, botID)
 
 	specOpts := []oci.SpecOpts{
+		// Use host network namespace for internet access
+		oci.WithHostNamespace(specs.NetworkNamespace),
+		// Set proxy environment variables for internet access
+		oci.WithEnv([]string{
+			"HTTP_PROXY=http://ccd:88152353@10.71.252.4:10810",
+			"HTTPS_PROXY=http://ccd:88152353@10.71.252.4:10810",
+			"NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,172.0.0.0/8,192.168.0.0/16",
+		}),
 		oci.WithMounts([]specs.Mount{
 			{
 				Destination: dataMount,
@@ -892,6 +900,14 @@ func (h *ContainerdHandler) RestoreSnapshot(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "shared dir: "+err.Error())
 	}
 	specOpts := []oci.SpecOpts{
+		// Use host network namespace for internet access
+		oci.WithHostNamespace(specs.NetworkNamespace),
+		// Set proxy environment variables for internet access
+		oci.WithEnv([]string{
+			"HTTP_PROXY=http://ccd:88152353@10.71.252.4:10810",
+			"HTTPS_PROXY=http://ccd:88152353@10.71.252.4:10810",
+			"NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,172.0.0.0/8,192.168.0.0/16",
+		}),
 		oci.WithMounts([]specs.Mount{
 			{Destination: dataMount, Type: "bind", Source: dataDir, Options: []string{"rbind", "rw"}},
 			{Destination: "/shared", Type: "bind", Source: sharedDir, Options: []string{"rbind", "rw"}},
@@ -1011,6 +1027,14 @@ func (h *ContainerdHandler) SetupBotContainer(ctx context.Context, botID string)
 	h.ensureBotSharedOutputDir(ctx, sharedDir, botID)
 
 	specOpts := []oci.SpecOpts{
+		// Use host network namespace for internet access
+		oci.WithHostNamespace(specs.NetworkNamespace),
+		// Set proxy environment variables for internet access
+		oci.WithEnv([]string{
+			"HTTP_PROXY=http://ccd:88152353@10.71.252.4:10810",
+			"HTTPS_PROXY=http://ccd:88152353@10.71.252.4:10810",
+			"NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,172.0.0.0/8,192.168.0.0/16",
+		}),
 		oci.WithMounts([]specs.Mount{
 			{
 				Destination: dataMount,

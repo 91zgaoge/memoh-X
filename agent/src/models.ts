@@ -15,6 +15,8 @@ export const ClientTypeModel = z.enum([
   'minimax-global', 'minimax-cn', 'moonshot-global', 'moonshot-cn',
   'volcengine', 'volcengine-coding', 'qianfan',
   'groq', 'openrouter', 'together', 'fireworks', 'perplexity',
+  'zhipu', 'siliconflow', 'nvidia', 'bailing', 'xiaomi', 'longcat', 'modelscope',
+  'kimi-coding',
 ])
 
 export const ModelConfigModel = z.object({

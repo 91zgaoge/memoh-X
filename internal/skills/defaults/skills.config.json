@@ -2,6 +2,10 @@
   "version": 1,
   "description": "Default skill configuration for Memoh-v2-saas",
   "defaults": {
+    "agent-fetch": {
+      "order": 1,
+      "enabled": true
+    },
     "agent-reach": {
       "order": 10,
       "enabled": true

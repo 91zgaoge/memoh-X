@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -50,12 +51,23 @@ type OutboundStream struct {
 	// Message rate limiting: track send timestamps in a sliding window (1 minute)
 	sendTimes []time.Time
 
+	// [PERF] 发送统计，用于诊断消息间隔问题
+	sendCount       int           // 发送次数计数
+	firstSendTime   time.Time     // 第一次发送时间
+	lastSendElapsed time.Duration // 上次发送距开始的时间
+
 	// Reasoning phase throttling
 	lastThinkingSendTime time.Time     // 上次思考阶段发送时间
 	thinkingSendInterval time.Duration // 思考阶段发送间隔
 
 	// Attachments to be sent with final message (via msg_item)
 	attachments []channel.Attachment
+
+	// ReceivedAt is the time when the message was received, used to calculate total response time
+	receivedAt time.Time
+
+	// timingAppended tracks if the timing info has been added to prevent duplicates
+	timingAppended bool
 }
 
 // StreamTimeout 流式消息超时时间（6分钟）
@@ -67,16 +79,16 @@ const MaxContentBytes = 20480
 // MinSendInterval 流式消息最小发送间隔（控制发送频率，避免过多消息）
 // WeCom 限制：30条/分钟，所以最小间隔为 2 秒（60/30=2）
 // 使用 3 秒留有更多余量，确保不会触发限制，同时减少消息数量避免干扰用户阅读
-const MinSendInterval = 3 * time.Second // 3秒，20条/分钟，严格遵守 WeCom 限制
+const MinSendInterval = 2 * time.Second // 2秒，30条/分钟，接近 WeCom 限制
 
-// MaxMessagesPerMinute 每分钟最大消息数（WeCom 限制 30，使用 20 留有余量）
-const MaxMessagesPerMinute = 20
+// MaxMessagesPerMinute 每分钟最大消息数（WeCom 限制 30，使用 25 留有余量）
+const MaxMessagesPerMinute = 25
 
 // ReasoningSendInterval 思考阶段流式更新最小间隔（防止 SDK 队列溢出）
-const ReasoningSendInterval = 800 * time.Millisecond
+const ReasoningSendInterval = 500 * time.Millisecond
 
 // NewOutboundStream creates a new outbound stream
-func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger, cmd ...string) *OutboundStream {
+func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *WebSocketClient, reqID, chatID, userID, chatType string, isMentioned bool, streamID string, logger *slog.Logger, receivedAt time.Time, cmd ...string) *OutboundStream {
 	// If no streamID provided, generate a new one
 	if streamID == "" {
 		streamID = generateStreamID()
@@ -104,6 +116,7 @@ func NewOutboundStream(adapter *Adapter, cfg channel.ChannelConfig, wsClient *We
 		stopTicker:           make(chan struct{}),
 		lastSendTime:         time.Now(),
 		thinkingSendInterval: ReasoningSendInterval,
+		receivedAt:           receivedAt,
 	}
 
 	// CRITICAL: Log the target user for message routing verification
@@ -349,6 +362,17 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			s.logger.Warn("final content was empty, using default message")
 		}
 
+		// Append response time statistics to the final message (only once)
+		if !s.receivedAt.IsZero() && !s.timingAppended {
+			totalDuration := time.Since(s.receivedAt)
+			durationStr := formatDuration(totalDuration)
+			finalContent += fmt.Sprintf("\n\n---\n⏱️ 本次对话耗时: %s", durationStr)
+			s.timingAppended = true
+			s.logger.Debug("[PERF] appending response time to final message",
+				slog.Duration("total_duration", totalDuration),
+				slog.String("formatted", durationStr))
+		}
+
 		s.logger.Info("sending final message",
 			slog.Int("content_len", len(finalContent)),
 			slog.String("stream_id", s.streamID))
@@ -418,11 +442,57 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 	return nil
 }
 
+// SendProgressUpdate 发送进度提示更新（如"正在搜索..."、"正在整理答案..."）
+// 用于在长时间处理期间向用户展示当前状态，减少等待焦虑
+func (s *OutboundStream) SendProgressUpdate(ctx context.Context, progressText string) error {
+	if s.closed.Load() {
+		return fmt.Errorf("stream is closed")
+	}
+
+	// 使用 stream 格式发送进度提示
+	progressBody := StreamMsgBody{
+		MsgType: MsgTypeStream,
+		Stream: StreamResponse{
+			ID:      s.streamID,
+			Finish:  false, // 未完成，后续会被实际内容替换
+			Content: progressText,
+		},
+	}
+
+	bodyBytes, err := json.Marshal(progressBody)
+	if err != nil {
+		s.logger.Debug("failed to marshal progress update", slog.Any("error", err))
+		return err
+	}
+
+	frame := WebsocketMessage{
+		Cmd:     s.cmd,
+		Headers: MessageHeaders{ReqID: s.reqID},
+		Body:    bodyBytes,
+	}
+
+	// 发送进度更新
+	if err := s.wsClient.sendFrame(frame); err != nil {
+		s.logger.Debug("failed to send progress update", slog.Any("error", err))
+		return err
+	}
+
+	s.logger.Info("[PERF] progress update sent",
+		slog.String("progress_text", progressText),
+		slog.String("stream_id", s.streamID),
+		slog.Duration("elapsed", time.Since(s.streamStartTime)))
+
+	return nil
+}
+
 // sendFullContent sends the full content to WeCom
 // Following SDK specification: always send complete content, not delta
 // If content exceeds MaxContentBytes, it will be sent using segmented sending.
 // When finish=true and attachments are present, they will be sent as msg_item (up to 10 images).
 func (s *OutboundStream) sendFullContent(ctx context.Context, content string, finish bool) error {
+	// [PERF] 记录发送开始时间
+	sendStartTime := time.Now()
+
 	// CRITICAL: Never send empty content for intermediate updates
 	if content == "" && !finish {
 		return nil
@@ -602,15 +672,29 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 		}
 
 		// Success - record send time for rate limiting (only for non-finish messages)
+		sendEndTime := time.Now()
+		totalSendTime := sendEndTime.Sub(sendStartTime)
+
 		if !finish {
 			s.mu.Lock()
-			s.sendTimes = append(s.sendTimes, time.Now())
+			s.sendTimes = append(s.sendTimes, sendEndTime)
+			// [PERF] 更新发送统计
+			if s.sendCount == 0 {
+				s.firstSendTime = sendEndTime
+			}
+			s.sendCount++
+			elapsedSinceStart := sendEndTime.Sub(s.streamStartTime)
+			s.lastSendElapsed = elapsedSinceStart
 			s.mu.Unlock()
 		}
 
 		if finish {
 			s.sent.Store(true)
-			s.logger.Info("[MSG_ROUTE] Final stream response sent successfully",
+			// [PERF] 记录最终消息发送时间和统计
+			s.mu.Lock()
+			totalElapsed := sendEndTime.Sub(s.streamStartTime)
+			s.mu.Unlock()
+			s.logger.Info("[PERF] Final stream response sent successfully",
 				slog.String("stream_id", streamID),
 				slog.String("cmd", cmd),
 				slog.String("send_req_id", sendReqID),
@@ -618,12 +702,22 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 				slog.String("target_chat_id", s.chatID),
 				slog.Int("content_bytes", len(truncatedContent)),
 				slog.Bool("was_truncated", wasTruncated),
-				slog.Int("attempts", attempt+1))
+				slog.Int("attempts", attempt+1),
+				slog.Duration("send_time", totalSendTime),
+				slog.Duration("total_elapsed", totalElapsed),
+				slog.Int("send_count", s.sendCount))
 		} else {
-			s.logger.Debug("intermediate stream update sent",
+			// [PERF] 记录中间消息发送统计
+			s.mu.Lock()
+			elapsedSinceStart := sendEndTime.Sub(s.streamStartTime)
+			s.mu.Unlock()
+			s.logger.Info("[PERF] intermediate stream update sent",
 				slog.String("stream_id", streamID),
 				slog.String("send_req_id", sendReqID),
-				slog.Int("content_bytes", len(truncatedContent)))
+				slog.Int("content_bytes", len(truncatedContent)),
+				slog.Int("send_count", s.sendCount),
+				slog.Duration("send_time", totalSendTime),
+				slog.Duration("elapsed_since_start", elapsedSinceStart))
 		}
 		return nil
 	}
@@ -671,6 +765,14 @@ func (s *OutboundStream) Close(ctx context.Context) error {
 	if content == "" {
 		content = "处理完成，请查看完整回复。"
 		s.logger.Warn("close content was empty, using default message")
+	}
+
+	// Append response time statistics to the final message (only once)
+	if !s.receivedAt.IsZero() && !s.timingAppended {
+		totalDuration := time.Since(s.receivedAt)
+		durationStr := formatDuration(totalDuration)
+		content += fmt.Sprintf("\n\n---\n⏱️ 本次对话耗时: %s", durationStr)
+		s.timingAppended = true
 	}
 
 	// Send final response with finish=true (with retries)
@@ -885,9 +987,9 @@ func (s *OutboundStream) sendSegmentedContent(ctx context.Context, content strin
 
 	// 后续段：使用独立消息（CmdSendMsg，新的 req_id）
 	for i := 1; i < len(segments); i++ {
-		// 频率控制：等待 3 秒（严格遵守 30条/分钟 = 每 2秒 1条，留有余量）
+		// 频率控制：等待 2 秒（30条/分钟 = 每 2秒 1条）
 		if i > 1 {
-			time.Sleep(3 * time.Second)
+			time.Sleep(2 * time.Second)
 		}
 
 		segment := segments[i]
@@ -1136,4 +1238,23 @@ func (s *OutboundStream) buildMsgItemsFromAttachments(attachments []channel.Atta
 func calculateMD5(data []byte) string {
 	hash := md5.Sum(data)
 	return hex.EncodeToString(hash[:])
+}
+
+// formatDuration formats a duration into a human-readable string
+// Examples: 1.5s, 2m30s, 1h2m3s
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	if d < time.Hour {
+		seconds := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), seconds)
+	}
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dh%dm%ds", hours, minutes, seconds)
 }

@@ -81,8 +81,8 @@ func NewManager(log *slog.Logger, registry *Registry, service ManagerStore, proc
 		connections:     map[string]*connectionEntry{},
 		logger:          log.With(slog.String("component", "channel")),
 		middlewares:     []Middleware{},
-		inboundQueue:    make(chan inboundTask, 256),
-		inboundWorkers:  4,
+		inboundQueue:    make(chan inboundTask, 1024),
+		inboundWorkers:  16,
 	}
 }
 

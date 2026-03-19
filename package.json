@@ -42,5 +42,10 @@
         "@algolia/client-search"
       ]
     }
-  }
+  },
+  "workspaces": [
+    "packages/*",
+    "docs",
+    "agent"
+  ]
 }

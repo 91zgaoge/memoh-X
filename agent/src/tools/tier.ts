@@ -22,8 +22,10 @@ export const createTierTools = ({ auth, identity, fetch: authFetch }: TierToolsO
     inputSchema: z.object({}),
     execute: async () => {
       const url = `${baseUrl}/bots/${botId}/tools/extended`
+      // auth.bearer already includes "Bearer " prefix from server
+      const authHeader = auth.bearer.startsWith('Bearer ') ? auth.bearer : `Bearer ${auth.bearer}`
       const res = await authFetch(url, {
-        headers: { Authorization: `Bearer ${auth.bearer}` },
+        headers: { Authorization: authHeader },
       })
       if (!res.ok) return { tools: [], error: `HTTP ${res.status}` }
       const data = await res.json().catch(() => ({ tools: [] }))

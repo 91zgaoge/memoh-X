@@ -707,55 +707,20 @@ func (r *Resolver) resolve(ctx context.Context, req conversation.ChatRequest) (r
 				"context_window": chatModel.ContextWindow,
 			}, 0)
 
-		var syncSummary string
-		var syncErr error
-		for attempt := 1; attempt <= 3; attempt++ {
-			syncSummary, _, syncErr = r.postSummarize(ctx, gatewayModelConfig{
-				ModelID:    chatModel.ModelID,
-				ClientType: mustNormalizeClientType(provider.ClientType),
-				Input:      chatModel.Input,
-				APIKey:     provider.ApiKey,
-				BaseURL:    provider.BaseUrl,
-				Reasoning:  chatModel.Reasoning,
-				MaxTokens:  chatModel.MaxTokens,
-			}, dropped, req.Token)
-			if syncErr == nil && strings.TrimSpace(syncSummary) != "" {
-				break
-			}
-			if attempt < 3 {
-				r.logger.Warn("sync summarize retry",
-					slog.Int("attempt", attempt),
-					slog.Any("error", syncErr),
-				)
-			}
-		}
-
-		if syncErr == nil && strings.TrimSpace(syncSummary) != "" {
-			r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
-				processlog.StepSummaryRequested, processlog.LevelInfo, "Sync summarization completed",
-				map[string]any{
-					"dropped_messages": droppedCount,
-					"summary_length":  len(syncSummary),
-				}, 0)
-			if pgBotID, parseErr := db.ParseUUID(req.BotID); parseErr == nil {
-				if _, upsertErr := r.queries.UpsertConversationSummary(ctx, sqlc.UpsertConversationSummaryParams{
-					BotID:        pgBotID,
-					ChatID:       req.ChatID,
-					Summary:      syncSummary,
-					MessageCount: int32(droppedCount),
-				}); upsertErr != nil {
-					r.logger.Warn("sync upsert summary failed", slog.Any("error", upsertErr))
-				}
-			}
-		} else {
-			r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
-				processlog.StepSummaryRequested, processlog.LevelInfo, "Sync summarize failed, falling back to async",
-				map[string]any{
-					"dropped_messages": droppedCount,
-					"error":           fmt.Sprintf("%v", syncErr),
-				}, 0)
-			r.asyncSummarize(req.BotID, req.ChatID, dropped, chatModel, provider, req.Token)
-		}
+		// [PERF] 直接异步化 summarize，不阻塞主流程
+		// 之前这里同步调用 postSummarize 最多重试 3 次，会阻塞消息处理
+		// 现在直接调用 asyncSummarize，让 summarize 在后台执行
+		r.logger.Info("[PERF] using async summarize to avoid blocking",
+			slog.String("bot_id", req.BotID),
+			slog.String("chat_id", req.ChatID),
+			slog.Int("dropped_messages", droppedCount))
+		r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
+			processlog.StepSummaryRequested, processlog.LevelInfo, "Async summarization scheduled",
+			map[string]any{
+				"dropped_messages": droppedCount,
+				"mode":             "async",
+			}, 0)
+		r.asyncSummarize(req.BotID, req.ChatID, dropped, chatModel, provider, req.Token)
 	}
 
 	skills := dedup(req.Skills)
@@ -830,6 +795,22 @@ func (r *Resolver) resolve(ctx context.Context, req conversation.ChatRequest) (r
 				allowSelfEvolution = promptRow.AllowSelfEvolution
 			}
 		}
+	}
+
+	// [PERF] 追加立即回答提示，启用流式响应优先
+	immediateHint := "\n\n[系统指令] 请立即开始回答，使用流式输出优先快速响应，不要等待完整思考。"
+	if botTask != "" {
+		botTask = botTask + immediateHint
+	} else {
+		botTask = immediateHint
+	}
+
+	// 记录优化后的提示长度
+	if len(botTask) > len(immediateHint) {
+		r.logger.Info("[PERF] added immediate response hint to botTask",
+			slog.String("bot_id", req.BotID),
+			slog.Int("task_length", len(botTask)),
+			slog.Int("hint_length", len(immediateHint)))
 	}
 
 	tz := r.timezone
@@ -1045,13 +1026,15 @@ func (r *Resolver) Chat(ctx context.Context, req conversation.ChatRequest) (conv
 			"response_preview": responsePreview,
 		}, 0)
 
-	return conversation.ChatResponse{
+	chatResp := conversation.ChatResponse{
 		Messages: resp.Messages,
 		Skills:   resp.Skills,
 		Model:    rc.model.ModelID,
 		Provider: rc.provider.ClientType,
 		Usage:    toTokenUsage(resp.Usage),
-	}, nil
+	}
+
+	return chatResp, nil
 }
 
 // --- TriggerSchedule / TriggerHeartbeat ---
@@ -2227,7 +2210,11 @@ func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit
 	userTurns := 0
 
 	// Process messages and apply history limit in a single pass
-	for _, m := range msgs {
+	// Also apply token-based limiting to prevent context overflow
+	const maxTotalTokens = 80000 // ~60K tokens for messages, leaving room for system prompt and response
+	var estimatedTokens int
+
+	for i, m := range msgs {
 		var mm conversation.ModelMessage
 		if err := json.Unmarshal(m.Content, &mm); err != nil {
 			r.logger.Warn("loadMessages: content unmarshal failed, treating as raw text",
@@ -2236,7 +2223,24 @@ func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit
 		} else {
 			mm.Role = m.Role
 		}
+
+		// Estimate tokens for this message
+		msgTokens := estimateMessageTokens(mm)
+
+		// Check if adding this message would exceed token limit
+		if estimatedTokens+msgTokens > maxTotalTokens && len(result) > 0 {
+			r.logger.Info("loadMessages: stopping due to token limit",
+				slog.String("chat_id", chatID),
+				slog.Int("messages_included", len(result)),
+				slog.Int("messages_total", len(msgs)),
+				slog.Int("estimated_tokens", estimatedTokens),
+				slog.Int("current_msg_tokens", msgTokens),
+				slog.Int("current_msg_index", i))
+			break
+		}
+
 		result = append(result, mm)
+		estimatedTokens += msgTokens
 
 		// Count user turns for limiting
 		if m.Role == "user" {
@@ -2247,7 +2251,55 @@ func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit
 		}
 	}
 
+	r.logger.Info("loadMessages: completed",
+		slog.String("chat_id", chatID),
+		slog.Int("messages_loaded", len(result)),
+		slog.Int("estimated_tokens", estimatedTokens),
+		slog.Int("user_turns", userTurns))
+
 	return result, nil
+}
+
+// estimateMessageTokens estimates the token count for a message
+// Uses a simple approximation: ~1.3 tokens per character for text
+// and counts base64 image data separately
+func estimateMessageTokens(msg conversation.ModelMessage) int {
+	if len(msg.Content) == 0 {
+		return 4 // Just overhead
+	}
+
+	var charCount int
+
+	// Try to unmarshal as string first
+	var textContent string
+	if err := json.Unmarshal(msg.Content, &textContent); err == nil {
+		charCount = len(textContent)
+	} else {
+		// Try to unmarshal as array of content parts
+		var parts []map[string]interface{}
+		if err := json.Unmarshal(msg.Content, &parts); err == nil {
+			for _, part := range parts {
+				if text, ok := part["text"].(string); ok {
+					charCount += len(text)
+				}
+				// Image base64 data - each char is roughly 1 token
+				if image, ok := part["image"].(string); ok {
+					charCount += len(image)
+				}
+			}
+		} else {
+			// Fallback: count raw content bytes
+			charCount = len(msg.Content)
+		}
+	}
+
+	// Rough estimate: 1.3 tokens per character on average
+	tokens := int(float64(charCount) * 1.3)
+
+	// Add overhead for message structure
+	tokens += 4
+
+	return tokens
 }
 
 type memoryContextItem struct {
@@ -3341,7 +3393,8 @@ func normalizeClientType(clientType string) (string, error) {
 		"deepseek", "zai-global", "zai-cn", "zai-coding-global", "zai-coding-cn",
 		"minimax-global", "minimax-cn", "moonshot-global", "moonshot-cn",
 		"volcengine", "volcengine-coding", "qianfan",
-		"groq", "openrouter", "together", "fireworks", "perplexity":
+		"groq", "openrouter", "together", "fireworks", "perplexity",
+		"kimi", "kimi-coding":
 		return ct, nil
 	default:
 		return "", fmt.Errorf("unsupported agent gateway client type: %s", clientType)

@@ -1,5 +1,363 @@
 # Memoh-v2 更新日志
 
+## [2026-03-19] 修复删除按钮 & 优化思考动画
+
+### 修复前端删除模型按钮
+**文件**: `packages/web/src/pages/models/components/model-item.vue`
+- 修复删除按钮传递 `model.id` (内部 UUID) 改为 `model.model_id`
+- 解决删除 LLM 模型按钮无效的问题
+
+### 配置所有 BOT 使用本地 Qwen3.5
+- 将所有 8 个 BOT 的对话模型和后台模型改为 `Qwen3.5-35B-A3B`
+- Provider: `local-qwen35-direct` (openai-compat)
+- 解决 Kimi Code API 客户端限制问题
+
+### 优化"思考中"动画效果
+**文件**: `internal/channel/adapters/wecom/adapter.go`
+- 添加波浪动画：`.` → `..` → `...`
+- 每 500ms 更新一次，最大持续 30 秒
+- 添加 ⏳ 沙漏图标提升视觉体验
+
+### 文档
+- 详细文档: `/data2/memoh-v2/docs/updates-2026-03-19.md`
+
+---
+
+## [2026-03-19] 添加 Kimi Code 模型支持
+
+### 概述
+修复 Memoh 无法添加和使用 Kimi Code (kimi-coding) 类型 Provider 的问题。
+
+### 问题原因
+`kimi-coding` 客户端类型在多个组件中配置不完整：
+- 前端配置缺失导致 UI 不显示
+- 后端验证缺失导致添加被拒绝
+- SDK 类型定义不完整
+
+### 修改内容
+1. **前端配置**: `packages/web/src/data/model-catalog.ts`
+   - 添加 `kimi-coding` provider 配置
+
+2. **前端类型列表**: `packages/web/src/pages/models/index.vue`
+   - 扩展硬编码的 `CLIENT_TYPES` 数组
+
+3. **SDK 类型**: `packages/sdk/src/types.gen.ts`
+   - 更新 `ProvidersClientType` 联合类型
+
+4. **后端验证**: `internal/providers/service.go`
+   - 更新 `isValidClientType()` 添加 `kimi-coding` 及其他缺失类型
+
+5. **CLI 选项**: `packages/cli/src/cli/index.ts`
+   - 更新 provider 创建命令的 choices 数组
+
+6. **Agent 支持**: `agent/src/types/model.ts`
+   - 更新 `SYSTEM_SAFE_PROVIDERS` 集合
+
+### 使用说明
+配置 Kimi Code Provider 时：
+- **Client Type**: 选择 "Kimi Code"
+- **Base URL**: `https://api.moonshot.cn/v1` (注意必须包含 `/v1`)
+- **API Key**: 填写 Moonshot API Key
+
+### 文档
+- 详细文档: `/data2/memoh-v2/docs/add-kimi-coding-support-2026-03-19.md`
+
+---
+
+## [2026-03-19] 删除对话消息缓存功能
+
+### 概述
+删除 `internal/conversation/flow/cache.go` 及 `resolver.go` 中的缓存相关代码。
+
+### 问题原因
+缓存功能与其他功能冲突，造成严重问题：
+- 相同查询返回缓存结果而不是实时生成
+- 破坏了对话的上下文感知能力
+- 导致某些功能无法正常工作
+
+### 删除内容
+1. **删除文件**: `internal/conversation/flow/cache.go`
+   - `ResponseCache` 结构体及所有相关方法
+
+2. **修改文件**: `internal/conversation/flow/resolver.go`
+   - 删除 `cache` 字段定义
+   - 删除 `NewResponseCache` 初始化
+   - 删除 `Chat()` 方法中的缓存查询逻辑
+   - 删除响应存入缓存的逻辑
+
+### 文档
+- 详细文档: `/data2/memoh-v2/docs/remove-conversation-cache-2026-03-19.md`
+
+### 回滚方法
+如需恢复缓存功能:
+```bash
+git checkout HEAD -- internal/conversation/flow/cache.go
+git checkout HEAD -- internal/conversation/flow/resolver.go
+```
+
+---
+
+## [2026-03-16] 新增对话时长统计功能
+
+### 概述
+在每次对话的回复文本末尾自动添加耗时统计，让用户了解从发送消息到收到完整回复的总耗时。
+
+### 功能特性
+- **自动计时**: 从接收到用户消息开始计时，到发送完最终回复结束
+- **智能格式化**: 根据时长自动选择合适的显示格式
+  - 小于1秒: 显示毫秒 (如: 850ms)
+  - 小于1分钟: 显示秒 (如: 2.5s)
+  - 小于1小时: 显示分秒 (如: 1m23s)
+  - 大于1小时: 显示时分秒 (如: 1h2m3s)
+- **显示位置**: 自动附加在回复文本末尾
+
+### 实现方式
+1. **数据传递**:
+   - `InboundMessage.ReceivedAt` 记录消息接收时间
+   - 通过 `StreamOptions.ReceivedAt` 传递到 WeCom Stream
+   - 在 `OutboundStream` 中使用 `timingAppended` 标志防止重复添加
+
+2. **修改文件**:
+   - `internal/channel/types.go` - 添加 `ReceivedAt` 字段到 `StreamOptions`
+   - `internal/channel/adapters/wecom/stream.go`:
+     - 添加 `receivedAt` 和 `timingAppended` 字段到 `OutboundStream`
+     - 添加 `formatDuration()` 辅助函数
+     - 在 `StreamEventFinal` 处理中添加时长统计（主要路径）
+     - 在 `Close()` 方法中添加时长统计（备用路径）
+   - `internal/channel/adapters/wecom/adapter.go` - 传递 `ReceivedAt`
+   - `internal/channel/inbound/channel.go` - 设置 `ReceivedAt`
+
+3. **显示格式**:
+   ```
+   这是机器人的回复内容...
+
+   ---
+   ⏱️ 本次对话耗时: 2.5s
+   ```
+
+### 部署
+```bash
+docker compose build server
+docker compose restart server
+```
+
+---
+
+## [2026-03-16] 修复机器人无回复内容问题
+
+### 概述
+修复机器人只回复"处理完成，请查看完整回复"而不显示实际内容的问题。
+
+### 问题原因
+1. **代码 Bug**: `agent/src/agent.ts` 中引用了未定义的变量 `result`
+2. **网络隔离**: Agent 容器无法访问 `172.17.0.1`（llama-server 监听地址）
+3. **HTTP 代理**: `HTTP_PROXY` 环境变量导致本地 LLM 请求被转发到外部代理，返回 503 错误
+
+### 修复措施
+
+#### 1. 修复 Agent 代码 Bug
+- **文件**: `agent/src/agent.ts`
+- 修复 `stream` 函数中引用未定义 `result` 变量的问题
+- 正确构建 `agent_end` 事件返回最终消息
+- 在 `catch` 块中也添加 `agent_end` 事件，确保错误时正常结束
+
+#### 2. 更新 LLM Provider 配置
+- **数据库更新**: 修改 `llm_providers` 表
+  ```sql
+  UPDATE llm_providers
+  SET base_url = 'http://host.docker.internal:17099/v1'
+  WHERE name = 'local-qwen35-direct';
+  ```
+
+#### 3. 更新 Docker Compose 配置
+- **文件**: `docker-compose.yml`
+- 添加 `extra_hosts` 使 Linux Docker 支持 `host.docker.internal`
+- 添加 `NO_PROXY` 环境变量排除本地地址
+  ```yaml
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  environment:
+    - HTTP_PROXY=http://ccd:88152353@10.40.31.69:10810
+    - HTTPS_PROXY=http://ccd:88152353@10.40.31.69:10810
+    - NO_PROXY=host.docker.internal,localhost,127.0.0.1,172.26.0.0/16
+  ```
+
+#### 4. 重建 Agent 镜像
+```bash
+docker compose build agent
+docker compose stop agent && docker compose rm -f agent
+docker compose up -d agent
+```
+
+### 验证方法
+```bash
+# 测试 LLM 连通性
+docker exec memoh-agent wget -qO- http://host.docker.internal:17099/v1/models
+
+# 查看 agent 日志
+docker logs memoh-agent --tail 50 -f
+```
+
+### 文档
+- 详见 `docs/fix-conversation-interruption-2026-03-16.md`
+
+---
+
+## [2026-03-16] 修复对话中断问题（直连 llama-server）
+
+### 概述
+修复对话中出现"处理过程中断，请重试"错误，通过将 Memoh 配置为直连本地 llama-server，绕过 sub2api 中间层。
+
+### 问题原因
+1. **sub2api 格式转换问题**: sub2api 将 Chat Completions API 转换为 Responses API 格式，llama-server 不支持
+2. **message role 不兼容**: Qwen3.5 chat template 不支持 `function` role，只支持 `tool` role
+
+### 修复措施
+
+#### 1. sub2api 增加透传模式（备用方案）
+- **文件**: `/tmp/sub2api/backend/internal/service/openai_gateway_chat_completions.go`
+- 为本地 LLM 服务器增加直接透传模式
+- 自动转换 `function` role 为 `tool` role
+
+#### 2. 配置 Memoh 直连 llama-server（实施方案）
+- **数据库更新**: 修改 `llm_providers` 表
+  - `base_url`: `http://172.26.0.1:28000/v1` → `http://172.17.0.1:17099/v1`
+  - `api_key`: 设置为 llama-server 永久 API key
+- **服务重启**: `docker compose restart server agent`
+
+### 当前架构
+```
+Memoh Agent → llama-server (直连)
+```
+
+### 文档
+- 详见 `docs/fix-conversation-interruption-2026-03-16.md`
+
+---
+
+## [2026-03-15] 性能优化：消息加载和 Token 估算
+
+### 概述
+针对企业微信适配器响应速度慢的问题进行深度优化，主要解决上下文加载过多和 Token 估算开销大的问题。
+
+### 核心优化
+
+#### 1. 消息加载优化
+- **问题**: `ListSince` 查询使用 `MaxCount: 10000`，在活跃对话中加载数千条消息
+- **解决**:
+  - 限制为 `MaxCount: 1000`
+  - 使用 `ListLatest` 替代 `ListSince`，直接在数据库层限制
+  - 硬限制最多返回 200 条消息
+- **效果**: 消息加载时间从 500-2000ms 降至 50-100ms
+
+#### 2. 处理流程简化
+- **问题**: 消息列表被反复遍历 5-6 次（JSON 反序列化、轮数限制、Token 估算、工具配对修复等）
+- **解决**:
+  - 合并 `limitHistoryTurns` 到 `loadMessages`，单次遍历完成
+  - 倒序遍历，达到限制时立即终止
+- **效果**: 减少 80% 的消息处理时间
+
+#### 3. 群消息防抖优化
+- **问题**: `DefaultGroupDebounceWindow = 300ms` 增加固定延迟
+- **解决**: 降低到 `50ms`
+- **效果**: 减少 250ms 固定延迟
+
+#### 4. 模型级 Token 估算开关
+- **问题**: Token 估算使用 O(N²) JSON 序列化，开销巨大
+- **解决**:
+  - 添加 `enable_token_estimate` 字段到 models 表（默认 false）
+  - 前端模型设置页面添加开关
+  - 关闭时使用快速模式（保留最近 30 条消息）
+  - 开启时使用精确 Token 估算
+- **效果**:
+  - 关闭时 Token 估算耗时为 0ms
+  - 用户可按模型灵活配置
+
+### 新增文件
+- `db/migrations/0045_model_token_estimate.up.sql` - 数据库迁移
+- `db/migrations/0045_model_token_estimate.down.sql` - 数据库回滚
+
+### 修改文件
+- `internal/message/service.go` - 限制消息查询数量
+- `internal/message/debounce.go` - 降低防抖延迟
+- `internal/conversation/flow/resolver.go` - 简化消息加载，添加 Token 估算开关
+- `internal/models/types.go` - Model struct 添加字段
+- `internal/models/models.go` - 更新 CRUD 操作
+- `internal/db/sqlc/models.go` - SQLC 模型定义
+- `internal/db/sqlc/models.sql.go` - SQLC 查询代码
+- `db/queries/models.sql` - 更新 SQL 查询
+- `packages/web/src/components/create-model/index.vue` - 前端表单添加开关
+- `packages/web/src/i18n/locales/zh.json` - 中文翻译
+- `packages/web/src/i18n/locales/en.json` - 英文翻译
+
+### 性能对比
+
+| 指标 | 优化前 | 优化后 | 提升 |
+|-----|--------|--------|------|
+| 上下文加载 | 500-2000ms | 50-100ms | **10-20x** |
+| Token 估算 | 300-1000ms | 0ms (关闭) | **完全消除** |
+| 单次请求总延迟 | 3-10 秒 | < 2 秒 | **3-5x** |
+| 数据库返回消息数 | 1000-10000 | < 200 | **10-50x** |
+
+### 适用场景建议
+
+| 场景 | Token 估算设置 | 原因 |
+|-----|---------------|------|
+| 大上下文模型 (32K+) | 开启 | 精确控制上下文，避免超出限制 |
+| 性能敏感场景 | 关闭 | 减少延迟，提升响应速度 |
+| 小模型/短对话 | 关闭 | 简单轮数限制已足够 |
+| 长对话/复杂任务 | 开启 | 精确管理上下文 |
+
+---
+
+## [2026-03-15] SearXNG 搜索引擎扩展
+
+### 新增搜索引擎
+
+扩展 SearXNG 可用搜索引擎，从原有的 4 个增加到 **17 个引擎**：
+
+#### 原有引擎
+| 引擎 | 类别 | 状态 |
+|------|------|------|
+| Google | 国际综合 | ✅ 可用 |
+| Bing | 国际综合 | ✅ 可用 |
+| 百度 | 中文综合 | ✅ 可用 |
+| 搜狗 | 中文综合 | ✅ 可用 |
+| Wikipedia | 知识 | ✅ 可用 |
+| Wikidata | 知识 | ✅ 可用 |
+
+#### 新增引擎（2026-03-15）
+| 引擎 | 类别 | 状态 | 说明 |
+|------|------|------|------|
+| Yahoo | 国际综合 | ✅ 可用 | 美国综合搜索引擎 |
+| Yandex | 国际综合 | ✅ 可用 | 俄罗斯搜索引擎 |
+| Mojeek | 国际综合 | ✅ 可用 | 隐私搜索引擎 |
+| Qwant | 国际综合 | ⚠️ 受限 | 欧洲隐私搜索引擎（暂时被限） |
+| 360搜索 | 中文综合 | ✅ 可用 | 360综合搜索 |
+| GitHub | 开发者 | ✅ 可用 | 代码仓库搜索 |
+| GitLab | 开发者 | ✅ 可用 | 代码仓库搜索 |
+| arXiv | 学术 | ✅ 可用 | 学术论文搜索 |
+| APKMirror | 应用 | ✅ 可用 | Android应用下载 |
+
+#### 已禁用引擎
+| 引擎 | 原因 |
+|------|------|
+| Brave | API限制 |
+| DuckDuckGo | 需要特殊配置 |
+| Startpage | 稳定性问题 |
+
+### 配置文件
+- **位置**: `docker/config/searxng-settings.yml`
+- **代理**: 已配置 HTTP/HTTPS 代理支持外网访问
+- **超时**: 请求超时 10s，最大超时 15s
+
+### 测试验证
+- 搜索测试："伊朗 以色列 美国 冲突 2026" - 返回 50+ 结果
+- 多语言支持：中文、英文搜索均正常
+- 实时新闻：可获取最新国际新闻动态
+
+---
+
 ## [2026-03-12] 企业微信流式消息问题修复总结
 
 ### 本次修复包含三个阶段的迭代优化

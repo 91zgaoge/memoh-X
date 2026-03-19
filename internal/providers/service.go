@@ -387,7 +387,9 @@ func isValidClientType(clientType ClientType) bool {
 		ClientTypeDeepSeek, ClientTypeZaiGlobal, ClientTypeZaiCN, ClientTypeZaiCodingGlobal, ClientTypeZaiCodingCN,
 		ClientTypeMinimaxGlobal, ClientTypeMinimaxCN, ClientTypeMoonshotGlobal, ClientTypeMoonshotCN,
 		ClientTypeVolcengine, ClientTypeVolcengineCoding, ClientTypeQianfan,
-		ClientTypeGroq, ClientTypeOpenRouter, ClientTypeTogether, ClientTypeFireworks, ClientTypePerplexity:
+		ClientTypeGroq, ClientTypeOpenRouter, ClientTypeTogether, ClientTypeFireworks, ClientTypePerplexity,
+		ClientTypeZhipu, ClientTypeSiliconflow, ClientTypeNvidia, ClientTypeBailing,
+		ClientTypeXiaomi, ClientTypeLongcat, ClientTypeModelScope, ClientTypeKimiCoding:
 		return true
 	default:
 		return false

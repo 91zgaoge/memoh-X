@@ -108,3 +108,71 @@ engines:
     shortcut: wd
     timeout: 5.0
     disabled: false
+
+  # 更多国际搜索引擎
+  - name: yahoo
+    engine: yahoo
+    shortcut: yh
+    timeout: 10.0
+    disabled: false
+    base_url: https://search.yahoo.com
+
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    timeout: 10.0
+    disabled: false
+
+  - name: yandex
+    engine: yandex
+    shortcut: yx
+    timeout: 10.0
+    disabled: false
+    base_url: https://yandex.com
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mk
+    timeout: 10.0
+    disabled: false
+
+  # 技术/开发者搜索
+  - name: github
+    engine: github
+    shortcut: gh
+    timeout: 10.0
+    disabled: false
+
+  - name: gitlab
+    engine: gitlab
+    shortcut: gl
+    timeout: 10.0
+    disabled: false
+
+  # 学术搜索
+  - name: arxiv
+    engine: arxiv
+    shortcut: ar
+    timeout: 10.0
+    disabled: false
+
+  # 其他搜索
+  - name: apkmirror
+    engine: apkmirror
+    shortcut: ap
+    timeout: 10.0
+    disabled: false
+
+  - name: brilliant
+    engine: brilliant
+    shortcut: brl
+    timeout: 10.0
+    disabled: false
+
+  # 其他中文搜索引擎
+  - name: 360search
+    engine: 360search
+    shortcut: 360
+    timeout: 15.0
+    disabled: false
+    interval: 3.0

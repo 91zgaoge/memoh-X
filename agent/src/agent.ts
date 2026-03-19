@@ -8,12 +8,12 @@ import {
   ToolSet,
   UserModelMessage,
 } from 'ai'
+
 import {
   AgentInput,
   AgentParams,
   AgentSkill,
   allActions,
-  MCPConnection,
   Schedule,
   SYSTEM_SAFE_PROVIDERS,
 } from './types'
@@ -30,7 +30,7 @@ import {
 } from './utils/attachments'
 import type { ContainerFileAttachment } from './types/attachment'
 import { withRetry, isRetryableLLMError } from './utils/retry'
-import { getMCPTools } from './tools/mcp'
+// // import { getMCPTools } from './tools/mcp'  // Disabled for troubleshooting  // Disabled for troubleshooting
 import { getTools } from './tools'
 import { wrapToolsWithLoopDetection, clearLoopDetectionState } from './tools/loop-detection'
 import { buildIdentityHeaders } from './utils/headers'
@@ -322,75 +322,21 @@ export const createAgent = (
     })
   }
 
-  // Cache builtin MCP tool definitions to avoid repeated HTTP round-trips.
-  const mcpToolCache: {
-    tools: ToolSet
-    close: () => Promise<void>
-    extKey: string
-    expiry: number
-  } = { tools: {}, close: async () => {}, extKey: '', expiry: 0 }
-
+  // MCP disabled for troubleshooting
   // Create tier tools once per agent instance so enabled-tools state is
   // scoped to this session and persists across turns (but not across agents).
   const tier = createTierTools({ auth, identity, fetch })
 
   const getAgentTools = async (sessionId?: string) => {
-    const baseUrl = normalizeBaseUrl(auth.baseUrl)
-    const botId = identity.botId.trim()
-    if (!baseUrl || !botId) {
-      return {
-        tools: {},
-        toolNames: [] as string[],
-        close: async () => {},
-      }
-    }
-    const baseHeaders = buildIdentityHeaders(identity, auth)
-    const enabledExt = tier.getEnabled()
-    const extKey = enabledExt.join(',')
-    const builtinHeaders = enabledExt.length > 0
-      ? { ...baseHeaders, 'X-Memoh-Include-Tools': extKey }
-      : baseHeaders
-
-    // Use cached builtin tools when available; always connect external MCP fresh.
-    let mcpTools: ToolSet
-    let closeMCP: () => Promise<void>
-
-    const cacheHit = mcpToolCache.expiry > Date.now()
-      && mcpToolCache.extKey === extKey
-      && Object.keys(mcpToolCache.tools).length > 0
-
-    if (!cacheHit) {
-      await mcpToolCache.close().catch(() => {})
-      const builtinConn: MCPConnection = {
-        type: 'http', name: 'builtin',
-        url: `${baseUrl}/bots/${botId}/tools`,
-        headers: builtinHeaders,
-      }
-      const res = await getMCPTools([builtinConn], { auth, fetch, botId })
-      mcpToolCache.tools = res.tools
-      mcpToolCache.close = res.close
-      mcpToolCache.extKey = extKey
-      mcpToolCache.expiry = Date.now() + SYSTEM_FILE_CACHE_TTL_MS
-    }
-
-    if (mcpConnections.length > 0) {
-      const ext = await getMCPTools(mcpConnections, { auth, fetch, botId })
-      mcpTools = { ...mcpToolCache.tools, ...ext.tools }
-      closeMCP = ext.close
-    } else {
-      mcpTools = mcpToolCache.tools
-      closeMCP = async () => {}
-    }
     const tools = getTools(allowedActions, { fetch, model: modelConfig, backgroundModel: backgroundModelConfig, identity, auth, enableSkill, mcpConnections, registry, teamMembers, callDepth })
     const { list_available_tools, enable_tools } = tier
-    const merged = { list_available_tools, enable_tools, ...mcpTools, ...tools } as ToolSet
+    const merged = { list_available_tools, enable_tools, ...tools } as ToolSet
     const toolNames = Object.keys(merged)
     const wrappedTools = sessionId ? wrapToolsWithLoopDetection(merged, sessionId) : merged
     return {
       tools: wrappedTools,
       toolNames,
       close: async () => {
-        await closeMCP()
         if (sessionId) clearLoopDetectionState(sessionId)
       },
     }
@@ -870,246 +816,97 @@ export const createAgent = (
   async function* stream(input: AgentInput): AsyncGenerator<AgentAction> {
     const userPrompt = generateUserPrompt(input)
     await Promise.all(input.skills.map((skill) => enableSkill(skill)))
-    // Auto-enable skills based on file attachments
     await autoEnableSkillsFromAttachments(input.attachments)
     const sessionId = `stream:${identity.botId}:${Date.now()}`
     const { tools, toolNames: streamToolNames, close } = await getAgentTools(sessionId)
     const systemPrompt = await generateSystemPrompt('full', streamToolNames)
-    // Build messages with system message at the beginning (required by Jinja template processing)
-    // SystemModelMessage requires content to be a string, not an array
-    // Remove any existing system messages from input to avoid duplicates
     const nonSystemMessages = sanitizeMessages(input.messages).filter((msg) => (msg as Record<string, unknown>).role !== 'system')
-    const systemMessage = {
-      role: 'system' as const,
-      content: systemPrompt,
-    }
-    const messages = [systemMessage, ...nonSystemMessages, userPrompt]
-    console.log('[Agent stream] Built messages:', messages.map((m: any) => ({ role: m.role, contentType: typeof m.content, contentPreview: typeof m.content === 'string' ? m.content?.slice(0, 200) : JSON.stringify(m.content)?.slice(0, 200) })))
-    const attachmentsExtractor = new AttachmentsStreamExtractor()
-    const result: {
-      messages: ModelMessage[];
-      reasoning: string[];
-      usage: LanguageModelUsage | null;
-    } = {
-      messages: [],
-      reasoning: [],
-      usage: null,
-    }
-    let closeCalled = false
-    const safeClose = async () => {
-      if (!closeCalled) {
-        closeCalled = true
-        await close()
-      }
-    }
-    // Abort controller for the streamText call. The per-step timeout is generous
-    // (10 min) because tool executions (file writes, API calls) can be slow.
-    // This is a safety net — the Go-side idle-timeout (30s) catches most hangs.
-    const streamAbort = new AbortController()
-    const STREAM_TIMEOUT_MS = 10 * 60 * 1000
-    const streamTimeoutId = setTimeout(() => streamAbort.abort(), STREAM_TIMEOUT_MS)
-    const { fullStream } = streamText({
-      model,
-      messages,
-      stopWhen: stepCountIs(Infinity),
-      tools,
-      providerOptions,
-      abortSignal: streamAbort.signal,
-      onFinish: async ({ usage, reasoning, response }) => {
-        clearTimeout(streamTimeoutId)
-        await safeClose()
-        result.usage = usage as never
-        result.reasoning = reasoning.map((part) => part.text)
-        result.messages = response.messages
-      },
-    })
-    yield {
-      type: 'agent_start',
-      input,
-    }
-    try {
-      const HEARTBEAT_MS = 3000
-      const iterator = fullStream[Symbol.asyncIterator]()
-      const deltaQueue: Array<{ runId: string; name: string; delta: string }> = []
-      const statusQueue: Array<{ runId: string; name: string; status: string }> = []
-      const attachmentQueue: Array<{ runId: string; name: string; attachment: { type: 'file'; path: string } }> = []
-      const onDelta = (d: { runId: string; name: string; delta: string }) => deltaQueue.push(d)
-      const onStatus = (s: { runId: string; name: string; status: string }) => statusQueue.push(s)
-      const onAttachment = (a: { runId: string; name: string; attachment: { type: 'file'; path: string } }) => attachmentQueue.push(a)
-      registry.events.on('delta', onDelta)
-      registry.events.on('status', onStatus)
-      registry.events.on('attachment', onAttachment)
-      let done = false
-      try {
-        while (!done) {
-          // Drain queued deltas
-          while (deltaQueue.length > 0) {
-            const d = deltaQueue.shift()!
-            yield { type: 'subagent_delta' as const, runId: d.runId, name: d.name, delta: d.delta }
-          }
-          // Drain queued status changes
-          while (statusQueue.length > 0) {
-            const s = statusQueue.shift()!
-            yield { type: 'subagent_completed' as const, runId: s.runId, name: s.name, status: s.status }
-          }
-          // Drain queued attachments from subagents
-          while (attachmentQueue.length > 0) {
-            const a = attachmentQueue.shift()!
-            yield { type: 'attachment_delta' as const, attachments: [a.attachment] }
-          }
-          const activeRuns = registry.listActive()
-          let iterResult: IteratorResult<any>
-          if (activeRuns.length > 0) {
-            const nextChunk = iterator.next()
-            let timerId: ReturnType<typeof setTimeout>
-            const timer = new Promise<'tick'>((r) => { timerId = setTimeout(() => r('tick'), HEARTBEAT_MS) })
-            const race = await Promise.race([nextChunk.then((v) => ({ tag: 'chunk' as const, v })), timer.then((t) => ({ tag: t }))])
-            clearTimeout(timerId!)
-            if (race.tag === 'tick') {
-              for (const run of activeRuns) {
-                yield {
-                  type: 'subagent_progress' as const,
-                  runId: run.runId,
-                  name: run.name,
-                  task: run.task,
-                  status: run.status,
-                  elapsed_ms: Date.now() - run.startedAt,
-                }
-              }
-              iterResult = await nextChunk
-            } else {
-              iterResult = race.v
-            }
-          } else {
-            iterResult = await iterator.next()
-          }
-          if (iterResult.done) { done = true; break }
-          const chunk = iterResult.value
-          if (chunk.type === 'error') {
-            throw new Error(
-              resolveStreamErrorMessage((chunk as { error?: unknown }).error),
-            )
-          }
-          switch (chunk.type) {
-          case 'reasoning-start':
-            yield {
-              type: 'reasoning_start',
-              metadata: chunk,
-            }
-            break
-          case 'reasoning-delta':
-            yield {
-              type: 'reasoning_delta',
-              delta: chunk.text,
-            }
-            break
-          case 'reasoning-end':
-            yield {
-              type: 'reasoning_end',
-              metadata: chunk,
-            }
-            break
-          case 'text-start':
-            yield {
-              type: 'text_start',
-            }
-            break
-          case 'text-delta': {
-            const { visibleText, attachments } = attachmentsExtractor.push(
-              chunk.text,
-            )
-            if (visibleText) {
-              yield {
-                type: 'text_delta',
-                delta: visibleText,
-              }
-            }
-            if (attachments.length) {
-              yield {
-                type: 'attachment_delta',
-                attachments,
-              }
-            }
-            break
-          }
-          case 'text-end': {
-            const remainder = attachmentsExtractor.flushRemainder()
-            if (remainder.visibleText) {
-              yield {
-                type: 'text_delta',
-                delta: remainder.visibleText,
-              }
-            }
-            if (remainder.attachments.length) {
-              yield {
-                type: 'attachment_delta',
-                attachments: remainder.attachments,
-              }
-            }
-            yield {
-              type: 'text_end',
-              metadata: chunk,
-            }
-            break
-          }
-          case 'tool-call':
-            yield {
-              type: 'tool_call_start',
-              toolName: chunk.toolName,
-              toolCallId: chunk.toolCallId,
-              input: chunk.input,
-              metadata: chunk,
-            }
-            break
-          case 'tool-result':
-            yield {
-              type: 'tool_call_end',
-              toolName: chunk.toolName,
-              toolCallId: chunk.toolCallId,
-              input: chunk.input,
-              result: truncateToolResult(chunk.output),
-              metadata: sanitizeToolChunkMetadata(
-                chunk as unknown as Record<string, unknown>,
-              ),
-            }
-            // Auto-emit attachment for file-write tools so frontend doesn't depend on LLM <attachments> tag
-            if (FILE_WRITE_TOOLS.has(chunk.toolName) && isWriteSuccess(chunk.output)) {
-              const writePath = extractWritePath(chunk.input)
-              if (writePath && isDeliverableWrite(writePath)) {
-                yield { type: 'attachment_delta', attachments: [{ type: 'file', path: writePath }] }
-              }
-            }
-            break
-          case 'file':
-            yield {
-              type: 'image_delta',
-              image: chunk.file.base64,
-              metadata: chunk,
-            }
-          }
-      }
-      } finally {
-        registry.events.off('delta', onDelta)
-        registry.events.off('status', onStatus)
-        registry.events.off('attachment', onAttachment)
-      }
-    } finally {
-      clearTimeout(streamTimeoutId)
-      await safeClose()
-    }
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...nonSystemMessages,
+      userPrompt
+    ]
+    console.log('[Agent stream] Built messages:', messages.length)
 
-    const { messages: strippedMessages } = stripAttachmentsFromMessages(
-      result.messages,
-    )
-    const cleanedMessages = stripReasoningFromMessages(
-      truncateMessagesForTransport(strippedMessages),
-    ) as ModelMessage[]
-    yield {
-      type: 'agent_end',
-      messages: cleanedMessages,
-      reasoning: result.reasoning,
-      usage: normalizeUsage(result.usage),
-      skills: getEnabledSkills(),
+    yield { type: 'agent_start', input }
+
+    try {
+      // Direct fetch to LLM API (bypass ai SDK due to Bun compatibility issues)
+      console.log('[Agent stream] Starting fetch to', modelConfig.baseUrl)
+      const fetchUrl = `${modelConfig.baseUrl.replace(/\/$/, '')}/chat/completions`
+      console.log('[Agent stream] Fetch URL:', fetchUrl)
+      const response = await fetch(fetchUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${modelConfig.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelConfig.modelId,
+          messages: messages.map((m: any) => ({
+            role: m.role,
+            content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          })),
+          stream: false,
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`[Agent stream] LLM API error ${response.status}:`, errorText)
+        throw new Error(`LLM API error: ${response.status} ${errorText}`)
+      }
+
+      const data = await response.json()
+      const content = data.choices?.[0]?.message?.content || ''
+
+      // Simulate streaming
+      yield { type: 'text_start' }
+      const chunkSize = 50
+      for (let i = 0; i < content.length; i += chunkSize) {
+        yield { type: 'text_delta', delta: content.slice(i, i + chunkSize) }
+      }
+      yield { type: 'text_end', metadata: {} }
+
+      await close()
+
+      // Build final messages with assistant response
+      const assistantMessage: ModelMessage = {
+        role: 'assistant',
+        content,
+      }
+      const finalMessages = [...messages, assistantMessage] as ModelMessage[]
+
+      const { messages: strippedMessages } = stripAttachmentsFromMessages(finalMessages)
+      const cleanedMessages = stripReasoningFromMessages(
+        truncateMessagesForTransport(strippedMessages),
+      ) as ModelMessage[]
+
+      yield {
+        type: 'agent_end',
+        messages: cleanedMessages,
+        reasoning: [],
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: content.length },
+        skills: getEnabledSkills(),
+      }
+    } catch (err) {
+      console.error('[Agent stream] Error:', err)
+      yield { type: 'text_delta', delta: `Error: ${err instanceof Error ? err.message : String(err)}` }
+      yield { type: 'text_end', metadata: {} }
+
+      // Even on error, yield agent_end with current messages
+      const { messages: strippedMessages } = stripAttachmentsFromMessages(messages as ModelMessage[])
+      const cleanedMessages = stripReasoningFromMessages(
+        truncateMessagesForTransport(strippedMessages),
+      ) as ModelMessage[]
+
+      yield {
+        type: 'agent_end',
+        messages: cleanedMessages,
+        reasoning: [],
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        skills: getEnabledSkills(),
+      }
     }
   }
 

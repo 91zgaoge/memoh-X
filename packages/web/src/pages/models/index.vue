@@ -35,6 +35,11 @@ import { useQuery } from '@pinia/colada'
 const CLIENT_TYPES: ProvidersClientType[] = [
   'openai', 'openai-compat', 'anthropic', 'google',
   'azure', 'bedrock', 'mistral', 'xai', 'ollama', 'dashscope',
+  'deepseek', 'zai-global', 'zai-cn', 'zai-coding-global', 'zai-coding-cn',
+  'minimax-global', 'minimax-cn', 'moonshot-global', 'moonshot-cn',
+  'volcengine', 'volcengine-coding', 'qianfan', 'groq', 'openrouter',
+  'together', 'fireworks', 'perplexity', 'zhipu', 'siliconflow', 'nvidia',
+  'bailing', 'xiaomi', 'longcat', 'modelscope', 'kimi-coding',
 ]
 
 const filterProvider = ref('')

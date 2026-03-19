@@ -330,6 +330,7 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 		Reply:           replyRef,
 		SourceMessageID: sourceMessageID,
 		Metadata:        streamMetadata,
+		ReceivedAt:      msg.ReceivedAt,
 	})
 	if err != nil {
 		if statusNotifier != nil {
@@ -1333,6 +1334,7 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 		Reply:           replyRef,
 		SourceMessageID: sourceMessageID,
 		Metadata:        streamMetadata,
+		ReceivedAt:      msg.ReceivedAt,
 	})
 	if err != nil {
 		return err
@@ -1462,9 +1464,17 @@ func buildInputAttachments(attachments []channel.Attachment, dataRoot string, lo
 		switch att.Type {
 		case channel.AttachmentImage:
 			if len(att.Data) > 0 {
+				// Compress image if needed to prevent token explosion
+				compressedData, mimeType, wasCompressed := compressImageIfNeeded(att.Data, att.Mime, logger)
+				if wasCompressed && logger != nil {
+					logger.Info("image compressed for LLM",
+						slog.String("originalSize", formatBytes(len(att.Data))),
+						slog.String("compressedSize", formatBytes(len(compressedData))),
+						slog.String("mimeType", mimeType))
+				}
 				out = append(out, conversation.InputAttachment{
 					Type:   "image",
-					Base64: base64.StdEncoding.EncodeToString(att.Data),
+					Base64: base64.StdEncoding.EncodeToString(compressedData),
 				})
 			}
 		case channel.AttachmentFile:

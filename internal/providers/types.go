@@ -40,6 +40,7 @@ const (
 	ClientTypeXiaomi          ClientType = "xiaomi"
 	ClientTypeLongcat         ClientType = "longcat"
 	ClientTypeModelScope      ClientType = "modelscope"
+	ClientTypeKimiCoding      ClientType = "kimi-coding"
 )
 
 // CreateRequest represents a request to create a new LLM provider

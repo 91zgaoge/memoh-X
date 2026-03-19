@@ -12,7 +12,91 @@
 
 ## 一、近期工作要点 (2026-03)
 
-### 1. 企业微信 (WeCom) 适配器升级
+### 1. 关键故障修复 (2026-03-16)
+
+#### 1.1 对话中断及无回复内容问题修复
+
+**问题现象**:
+- 对话中出现"处理过程中断，请重试"错误
+- 机器人只回复"处理完成，请查看完整回复"，不显示实际内容
+
+**根本原因**:
+| 问题 | 原因 | 影响 |
+|------|------|------|
+| 代码 Bug | `agent.ts` 引用未定义变量 `result` | 无法返回 LLM 生成的内容 |
+| 网络隔离 | Agent 容器无法访问 `172.17.0.1` | LLM 请求失败 |
+| HTTP 代理 | 代理转发本地请求返回 503 | 请求被错误路由 |
+
+**修复措施**:
+1. **修复 Agent 代码**: 修正 `agent/src/agent.ts` 中 `stream` 函数的错误
+2. **更新网络配置**: 使用 `host.docker.internal` 替代 IP 地址
+3. **配置 NO_PROXY**: 排除本地地址不被代理
+4. **重建 Agent**: 重新构建并部署 Agent 容器
+
+**关键文件**:
+```
+agent/src/agent.ts                        # 修复代码 Bug
+docker-compose.yml                        # 添加 extra_hosts 和 NO_PROXY
+docs/fix-conversation-interruption-2026-03-16.md  # 详细修复记录
+docs/UPGRADE_GUIDE.md                     # 升级维护手册
+docs/QUICK_REFERENCE.md                   # 快速参考卡片
+```
+
+**快速修复命令**:
+```bash
+# 1. 更新 LLM Provider 配置
+docker exec -e PGPASSWORD=memoh123 memoh-postgres psql -U memoh -d memoh -c \
+  "UPDATE llm_providers SET base_url = 'http://host.docker.internal:17099/v1' WHERE name = 'local-qwen35-direct';"
+
+# 2. 重建并重启 Agent
+cd /data2/memoh-v2 && docker compose build agent
+docker compose stop agent && docker compose rm -f agent
+docker compose up -d agent
+
+# 3. 验证
+docker logs memoh-agent --tail 20
+```
+
+---
+
+### 2. 性能优化 (2026-03-15)
+
+针对企业微信适配器响应速度慢的问题进行深度优化。
+
+#### 1.1 核心优化项
+| 优化项 | 原状态 | 优化后 | 效果 |
+|--------|--------|--------|------|
+| 消息加载 | MaxCount: 10000 | MaxCount: 1000, 硬限制 200 条 | 加载时间 500ms→50ms |
+| 处理流程 | 遍历 5-6 次 | 单次遍历完成 | 减少 80% 处理时间 |
+| 群消息防抖 | 300ms | 50ms | 减少 250ms 延迟 |
+| Token 估算 | 强制启用 | 模型级开关（默认关闭） | 估算耗时 0ms |
+
+#### 1.2 模型级 Token 估算开关
+- **功能**: 每个模型可独立配置是否启用 Token 估算
+- **默认**: 关闭（使用快速模式）
+- **开启时**: 精确 Token 估算（较慢但更精确）
+- **关闭时**: 保留最近 30 条消息（快速模式）
+- **数据库字段**: `models.enable_token_estimate` (BOOLEAN, DEFAULT false)
+- **前端位置**: 模型设置页面 → "启用 Token 估算" 开关
+
+#### 1.3 适用场景建议
+| 场景 | Token 估算设置 | 原因 |
+|------|---------------|------|
+| 大上下文模型 (32K+) | 开启 | 精确控制上下文，避免超出限制 |
+| 性能敏感场景 | 关闭 | 减少延迟，提升响应速度 |
+| 小模型/短对话 | 关闭 | 简单轮数限制已足够 |
+| 长对话/复杂任务 | 开启 | 精确管理上下文 |
+
+#### 1.4 关键文件
+```
+internal/conversation/flow/resolver.go    # 核心优化逻辑
+internal/message/service.go               # 消息查询限制
+internal/message/debounce.go              # 防抖延迟
+internal/models/types.go                  # Token 估算字段
+packages/web/src/components/create-model/index.vue  # 前端开关
+```
+
+### 2. 企业微信 (WeCom) 适配器升级
 
 #### 1.1 新增功能
 | 功能 | 状态 | 说明 |
@@ -62,13 +146,25 @@
 
 ### 2. 基础设施修复
 
-#### 2.1 SearXNG 联网搜索 (2026-03-12)
+#### 2.1 性能优化数据库迁移 (2026-03-15)
+- **迁移文件**: `0045_model_token_estimate.up.sql`
+- **变更**: 添加 `enable_token_estimate` 字段到 models 表
+- **默认**: false（优先性能）
+
+#### 2.2 SearXNG 联网搜索 (2026-03-12 修复, 2026-03-15 扩展引擎)
 - **问题**: SearXNG 容器无法访问外网（搜索引擎超时）
 - **修复**:
   - 配置 HTTP 代理: `http://ccd:88152353@10.71.252.4:10810`
   - 升级 SearXNG 镜像到最新版
   - 添加 `SEARXNG_DEFAULT_LANG=en` 修复 Google 引擎语言代码问题
 - **配置文件**: `docker/config/searxng-settings.yml`
+- **可用引擎** (17个):
+  - 国际综合: Google, Bing, Yahoo, Yandex, Mojeek
+  - 中文综合: 百度, 搜狗, 360搜索
+  - 知识: Wikipedia, Wikidata
+  - 开发者: GitHub, GitLab
+  - 学术: arXiv
+  - 其他: APKMirror
 
 #### 2.2 LLM 服务配置 (2026-03-11)
 - **问题**: Docker 容器无法访问 LLM provider (`10.62.239.13`)
@@ -155,7 +251,27 @@
 ### 3.3 数据库迁移
 ```
 /data2/memoh-v2/db/migrations/
-└── 0044_add_trigger_started_enum.up.sql  # 枚举修复
+├── 0044_add_trigger_started_enum.up.sql      # 枚举修复
+├── 0045_model_token_estimate.up.sql          # Token 估算字段
+└── 0045_model_token_estimate.down.sql        # Token 估算字段回滚
+```
+
+### 3.4 性能优化相关文件
+```
+/data2/memoh-v2/
+├── internal/conversation/flow/resolver.go     # 对话流程优化
+├── internal/message/service.go                # 消息查询优化
+├── internal/message/debounce.go               # 防抖延迟优化
+├── internal/models/types.go                   # Model struct
+├── internal/models/models.go                  # 模型 CRUD
+├── internal/db/sqlc/models.go                 # SQLC 模型
+├── internal/db/sqlc/models.sql.go             # SQLC 查询
+└── db/queries/models.sql                      # SQL 查询
+
+# 前端
+packages/web/src/components/create-model/index.vue  # 模型设置表单
+packages/web/src/i18n/locales/zh.json               # 中文翻译
+packages/web/src/i18n/locales/en.json               # 英文翻译
 ```
 
 ---
@@ -223,5 +339,26 @@ docker exec -i memoh-postgres psql -U memoh < volumes/postgres_dump.sql
 
 ---
 
-*文档生成时间: 2026-03-13 21:30:00*  
+## 七、文档索引
+
+### 故障修复文档
+| 文档 | 说明 | 日期 |
+|------|------|------|
+| [docs/fix-conversation-interruption-2026-03-16.md](docs/fix-conversation-interruption-2026-03-16.md) | 对话中断及无回复内容修复（详细） | 2026-03-16 |
+| [docs/UPGRADE_GUIDE.md](docs/UPGRADE_GUIDE.md) | 升级与维护操作手册 | 2026-03-16 |
+| [docs/QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md) | 快速参考卡片 | 2026-03-16 |
+| [docs/sub2api-local-llm-setup-2026-03-16.md](docs/sub2api-local-llm-setup-2026-03-16.md) | Sub2API 本地 LLM 配置 | 2026-03-16 |
+| [docs/agent-fetch-installation-2026-03-16.md](docs/agent-fetch-installation-2026-03-16.md) | Agent Fetch 安装指南 | 2026-03-16 |
+| [docs/SECURITY_CHANGE_NOTICE_2026-03-15.md](docs/SECURITY_CHANGE_NOTICE_2026-03-15.md) | 安全配置变更通知 | 2026-03-15 |
+
+### 项目文档
+| 文档 | 说明 |
+|------|------|
+| [CHANGELOG.md](CHANGELOG.md) | 更新日志 |
+| [README.md](README.md) | 项目说明 |
+| [AGENTS.md](AGENTS.md) | Agent 配置指南 |
+
+---
+
+*文档生成时间: 2026-03-16*
 *备份版本: memoh_backup_20260313_212717*

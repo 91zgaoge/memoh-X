@@ -15,7 +15,57 @@ fi
 
 # Create CNI network config if not exists
 if [ ! -f /etc/cni/net.d/10-memoh.conflist ]; then
-cat > /etc/cni/net.d/10-memoh.conflist << 'EOF'
+    # Check if shared CNI config exists
+    if [ -f /opt/memoh/data/shared/10-memoh.conflist ]; then
+        echo "Using shared CNI config from /opt/memoh/data/shared/"
+        cp /opt/memoh/data/shared/10-memoh.conflist /etc/cni/net.d/10-memoh.conflist
+    else
+        # Auto-detect Docker bridge for memoh network
+        echo "Detecting Docker network configuration..."
+        # Get default gateway interface
+        GATEWAY_IP=$(ip route | grep default | awk '{print $3}' | head -1)
+        # Find the bridge interface connected to the same subnet
+        BRIDGE_IF=""
+        for br in $(ip -o link show type bridge | awk -F': ' '{print $2}'); do
+            if ip addr show "$br" | grep -q "172.26.0.1"; then
+                BRIDGE_IF="$br"
+                break
+            fi
+        done
+
+        if [ -n "$BRIDGE_IF" ]; then
+            echo "Found Docker bridge: $BRIDGE_IF"
+            cat > /etc/cni/net.d/10-memoh.conflist << EOF
+{
+  "cniVersion": "1.0.0",
+  "name": "memoh-cni",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "$BRIDGE_IF",
+      "isGateway": false,
+      "ipMasq": false,
+      "promiscMode": true,
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[
+          { "subnet": "172.26.0.0/16", "gateway": "172.26.0.1" }
+        ]],
+        "routes": [
+          { "dst": "0.0.0.0/0" }
+        ]
+      }
+    },
+    {
+      "type": "portmap",
+      "capabilities": { "portMappings": true }
+    }
+  ]
+}
+EOF
+        else
+            echo "WARNING: Could not detect Docker bridge, using default CNI config"
+            cat > /etc/cni/net.d/10-memoh.conflist << 'EOF'
 {
   "cniVersion": "1.0.0",
   "name": "memoh-cni",
@@ -43,6 +93,8 @@ cat > /etc/cni/net.d/10-memoh.conflist << 'EOF'
   ]
 }
 EOF
+        fi
+    fi
 fi
 
 # Start containerd in background

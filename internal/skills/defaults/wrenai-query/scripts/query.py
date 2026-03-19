@@ -19,6 +19,14 @@ WRENAI_PG_URL = os.environ.get('WRENAI_PG_URL', f'http://{WRENAI_HOST}:5555')
 WRENAI_MSSQL_URL = os.environ.get('WRENAI_MSSQL_URL', f'http://{WRENAI_HOST}:6555')
 WRENAI_HR_URL = os.environ.get('WRENAI_HR_URL', f'http://{WRENAI_HOST}:7555')
 
+# WrenUI URLs for SQL execution
+WRENUI_PG_URL = os.environ.get('WRENUI_PG_URL', f'http://{WRENAI_HOST}:3000')
+WRENUI_MSSQL_URL = os.environ.get('WRENUI_MSSQL_URL', f'http://{WRENAI_HOST}:4000')
+WRENUI_HR_URL = os.environ.get('WRENUI_HR_URL', f'http://{WRENAI_HOST}:5000')
+
+# Query limit
+WRENAI_QUERY_LIMIT = int(os.environ.get('WRENAI_QUERY_LIMIT', '500'))
+
 def get_instance_url(instance: str) -> str:
     """Get instance URL based on instance name"""
     instance = instance.lower().strip()
@@ -30,6 +38,40 @@ def get_instance_url(instance: str) -> str:
         return WRENAI_HR_URL
     else:
         raise ValueError(f"Unknown instance: {instance}. Valid: pg, mssql, hr")
+
+def get_wrenui_url(instance: str) -> str:
+    """Get WrenUI URL for SQL execution"""
+    instance = instance.lower().strip()
+    if instance in ('pg', 'postgresql', 'postgres'):
+        return WRENUI_PG_URL
+    elif instance in ('mssql', 'fanwei', 'sqlserver'):
+        return WRENUI_MSSQL_URL
+    elif instance in ('hr', 'hongjing'):
+        return WRENUI_HR_URL
+    else:
+        return WRENUI_PG_URL
+
+def execute_sql(ui_url: str, sql: str, limit: int = WRENAI_QUERY_LIMIT) -> Optional[Dict[str, Any]]:
+    """Execute SQL via WrenUI API"""
+    run_sql_url = f"{ui_url}/api/v1/run_sql"
+
+    request_body = {
+        'sql': sql,
+        'limit': limit
+    }
+
+    try:
+        req = urllib.request.Request(
+            run_sql_url,
+            data=json.dumps(request_body).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        print(f"  ⚠️ SQL execution error: {e}", file=sys.stderr)
+        return None
 
 def check_health(url: str) -> bool:
     """Check WrenAI health"""
@@ -141,10 +183,21 @@ def poll_results(url: str, query_id: str, max_attempts: int = 180, interval: int
 
     raise TimeoutError(f"Query timed out after {max_attempts * interval} seconds")
 
-def format_results(response: Dict[str, Any], query: str) -> str:
-    """Format and display results"""
+def format_results(response: Dict[str, Any], query: str, ui_url: Optional[str] = None) -> str:
+    """Format and display results with SQL execution"""
+    # Validate response
+    if response is None:
+        return json.dumps({
+            'success': False,
+            'error': {
+                'code': 'INVALID_RESPONSE',
+                'message': 'No response received from WrenAI'
+            }
+        }, ensure_ascii=False, indent=2)
+
     # Check for errors
-    error_msg = response.get('error', {}).get('message') or response.get('error')
+    error_obj = response.get('error') if isinstance(response.get('error'), dict) else {}
+    error_msg = error_obj.get('message') if error_obj else response.get('error')
     if error_msg:
         return json.dumps({
             'success': False,
@@ -154,23 +207,71 @@ def format_results(response: Dict[str, Any], query: str) -> str:
             }
         }, ensure_ascii=False, indent=2)
 
-    # Extract SQL
-    sql = response.get('sql') or response.get('generated_sql') or 'N/A'
+    # Extract SQL from response array
+    sql = None
+    if response.get('response') and len(response['response']) > 0:
+        sql = response['response'][0].get('sql')
+    if not sql:
+        sql = response.get('sql') or response.get('generated_sql')
 
-    # Extract results
-    results = response.get('results') or response.get('data')
+    if not sql:
+        return json.dumps({
+            'success': False,
+            'error': {
+                'code': 'NO_SQL_GENERATED',
+                'message': 'WrenAI did not generate any SQL for this query'
+            }
+        }, ensure_ascii=False, indent=2)
 
-    # Extract analysis/answer
-    analysis = response.get('analysis') or response.get('answer') or response.get('response') or 'N/A'
+    # Execute SQL to get actual results
+    execution_success = False
+    execution_error = ''
+    execution_result = None
 
-    return json.dumps({
-        'success': True,
-        'query': query,
-        'sql': sql,
-        'results': results,
-        'analysis': analysis,
-        'raw_response': response
-    }, ensure_ascii=False, indent=2)
+    if ui_url:
+        print("▶️  Executing SQL via WrenUI...", file=sys.stderr)
+        exec_response = execute_sql(ui_url, sql, WRENAI_QUERY_LIMIT)
+
+        if exec_response:
+            if 'records' in exec_response:
+                execution_result = exec_response
+                execution_success = True
+                print("✅ SQL executed successfully", file=sys.stderr)
+            else:
+                execution_error = exec_response.get('message', exec_response.get('error', 'Unknown execution error'))
+                print(f"⚠️  SQL execution warning: {execution_error}", file=sys.stderr)
+        else:
+            print("⚠️  Could not execute SQL (WrenUI may not be available)", file=sys.stderr)
+
+    # Extract analysis from reasoning fields
+    analysis = response.get('sql_generation_reasoning') or response.get('intent_reasoning') or 'N/A'
+
+    # Build output
+    if execution_success and execution_result:
+        return json.dumps({
+            'success': True,
+            'query': query,
+            'sql': sql,
+            'results': {
+                'records': execution_result.get('records', []),
+                'columns': execution_result.get('columns', []),
+                'total_rows': execution_result.get('totalRows', 0)
+            },
+            'execution_success': True,
+            'analysis': analysis,
+            'raw_response': response
+        }, ensure_ascii=False, indent=2)
+    else:
+        return json.dumps({
+            'success': True,
+            'query': query,
+            'sql': sql,
+            'results': None,
+            'execution_success': False,
+            'execution_error': execution_error or 'SQL execution not available',
+            'analysis': analysis,
+            'raw_response': response
+        }, ensure_ascii=False, indent=2)
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
@@ -194,6 +295,10 @@ Environment Variables:
   WRENAI_PG_URL      PostgreSQL instance URL (default: http://10.62.239.13:5555)
   WRENAI_MSSQL_URL   MSSQL instance URL (default: http://10.62.239.13:6555)
   WRENAI_HR_URL      HR instance URL (default: http://10.62.239.13:7555)
+  WRENUI_PG_URL      WrenUI PostgreSQL URL for SQL execution (default: http://10.62.239.13:3000)
+  WRENUI_MSSQL_URL   WrenUI MSSQL URL for SQL execution (default: http://10.62.239.13:4000)
+  WRENUI_HR_URL      WrenUI HR URL for SQL execution (default: http://10.62.239.13:5000)
+  WRENAI_QUERY_LIMIT Max rows to return from SQL execution (default: 500)
   WRENAI_HOST        WrenAI host IP (optional, default: 10.62.239.13)""")
         sys.exit(0)
 
@@ -243,8 +348,11 @@ Environment Variables:
         # Poll for results
         results = poll_results(url, query_id)
 
+        # Get WrenUI URL for SQL execution
+        ui_url = get_wrenui_url(instance)
+
         # Format and output results
-        print(format_results(results, query))
+        print(format_results(results, query, ui_url))
 
     except Exception as e:
         print(json.dumps({

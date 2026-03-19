@@ -84,7 +84,8 @@ export const getCallAgentTools = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${auth.bearer}`,
+            // auth.bearer already includes "Bearer " prefix from server
+            'Authorization': auth.bearer.startsWith('Bearer ') ? auth.bearer : `Bearer ${auth.bearer}`,
           },
           body: JSON.stringify({
             caller_bot_id: callerBotId,

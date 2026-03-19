@@ -179,6 +179,14 @@ export const providerCatalog: Record<string, ProviderInfo> = {
       { modelId: 'kimi-k2.5', name: 'Kimi K2.5', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: false },
     ],
   },
+  'kimi-coding': {
+    label: 'Kimi Code',
+    defaultBaseUrl: 'https://api.moonshot.cn/v1',
+    models: [
+      { modelId: 'kimi-k2.5', name: 'Kimi K2.5', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: false },
+      { modelId: 'kimi-k2', name: 'Kimi K2', contextWindow: 256000, maxTokens: 8192, reasoning: false, isMultimodal: false },
+    ],
+  },
   volcengine: {
     label: '火山引擎 / Doubao',
     defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',

@@ -61,7 +61,7 @@
       <ConfirmPopover
         :message="$t('models.deleteModelConfirm')"
         :loading="deleteLoading"
-        @confirm="$emit('delete', model.id ?? '')"
+        @confirm="$emit('delete', model.model_id ?? '')"
       >
         <template #trigger>
           <Button
