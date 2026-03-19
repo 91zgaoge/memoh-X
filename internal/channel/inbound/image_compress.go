@@ -11,22 +11,23 @@ import (
 )
 
 // Image compression constants
-// ADJUSTED: Less aggressive compression to preserve image quality for LLM recognition
+// With 524K context window, we can afford larger images
+// Target: ~100KB compressed (100K tokens) per image, max 3 images = 300K tokens
+// Leaves ~200K for system prompt (~50K) + response (~100K) + text messages (~50K)
 const (
-	// Size thresholds - INCREASED to reduce unnecessary compression
-	smallImageThreshold  = 800 * 1024  // 800KB - no compression needed (was 100KB)
-	mediumImageThreshold = 2 * 1024 * 1024 // 2MB - moderate compression (was 1MB)
+	// Size thresholds - RELAXED for 524K context
+	smallImageThreshold  = 500 * 1024  // 500KB - no compression (was 200KB)
+	largeImageThreshold  = 2 * 1024 * 1024  // 2MB - large image threshold
 
-	// Target dimensions - INCREASED for better clarity
-	maxSmallDimension  = 1536 // for medium images (was 1024)
-	maxLargeDimension  = 1024 // for large images (was 512)
+	// Target dimensions - INCREASED for better quality
+	// 1024x1024 at quality 85 produces ~100-200KB JPEG
+	maxDimension = 1024  // Max 1024px (was 768px)
 
-	// JPEG quality - INCREASED for better quality
-	jpegQualityMedium = 90 // was 85
-	jpegQualityHigh   = 85 // was 70
+	// JPEG quality - INCREASED for better recognition
+	jpegQuality = 85  // was 80
 )
 
-// compressImageIfNeeded compresses image data if it exceeds size thresholds
+// compressImageIfNeeded compresses image data to ensure it fits within token limits
 // Returns compressed data, mime type, and whether compression was applied
 func compressImageIfNeeded(data []byte, mimeType string, logger *slog.Logger) ([]byte, string, bool) {
 	originalSize := len(data)
@@ -49,37 +50,24 @@ func compressImageIfNeeded(data []byte, mimeType string, logger *slog.Logger) ([
 	width := bounds.Dx()
 	height := bounds.Dy()
 
-	// Determine target dimensions and quality based on original size
-	var targetMaxDim, quality int
-	if originalSize < mediumImageThreshold {
-		targetMaxDim = maxSmallDimension
-		quality = jpegQualityMedium
-		logger.Info("compressing medium image",
-			slog.Int("originalSize", originalSize),
-			slog.String("format", format),
-			slog.Int("width", width),
-			slog.Int("height", height),
-			slog.Int("targetMaxDim", targetMaxDim))
-	} else {
-		targetMaxDim = maxLargeDimension
-		quality = jpegQualityHigh
-		logger.Info("compressing large image",
-			slog.Int("originalSize", originalSize),
-			slog.String("format", format),
-			slog.Int("width", width),
-			slog.Int("height", height),
-			slog.Int("targetMaxDim", targetMaxDim))
-	}
+	// Always compress to maxDimension for consistency
+	logger.Info("compressing image for token limit compliance",
+		slog.Int("originalSize", originalSize),
+		slog.String("format", format),
+		slog.Int("width", width),
+		slog.Int("height", height),
+		slog.Int("targetMaxDim", maxDimension),
+		slog.Int("quality", jpegQuality))
 
 	// Calculate new dimensions maintaining aspect ratio
-	newWidth, newHeight := calculateDimensions(width, height, targetMaxDim)
+	newWidth, newHeight := calculateDimensions(width, height, maxDimension)
 
 	// Resize image
 	resized := resizeImage(img, newWidth, newHeight)
 
 	// Encode to JPEG with specified quality
 	var buf bytes.Buffer
-	err = jpeg.Encode(&buf, resized, &jpeg.Options{Quality: quality})
+	err = jpeg.Encode(&buf, resized, &jpeg.Options{Quality: jpegQuality})
 	if err != nil {
 		logger.Warn("failed to encode compressed image, using original",
 			slog.String("error", err.Error()),
@@ -89,6 +77,24 @@ func compressImageIfNeeded(data []byte, mimeType string, logger *slog.Logger) ([
 
 	compressed := buf.Bytes()
 	compressedSize := len(compressed)
+
+	// For very large images, apply additional compression if needed
+	if compressedSize > largeImageThreshold {
+		logger.Info("image still too large after compression, applying stronger compression",
+			slog.Int("compressedSize", compressedSize),
+			slog.Int("targetSize", largeImageThreshold))
+
+		// Try with lower quality
+		buf.Reset()
+		err = jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 60})
+		if err == nil {
+			recompressed := buf.Bytes()
+			if len(recompressed) < compressedSize {
+				compressed = recompressed
+				compressedSize = len(compressed)
+			}
+		}
+	}
 
 	// Only use compressed if it's actually smaller
 	if compressedSize >= originalSize {
@@ -103,7 +109,8 @@ func compressImageIfNeeded(data []byte, mimeType string, logger *slog.Logger) ([
 		slog.Int("compressedSize", compressedSize),
 		slog.Float64("ratio", float64(compressedSize)/float64(originalSize)),
 		slog.Int("width", newWidth),
-		slog.Int("height", newHeight))
+		slog.Int("height", newHeight),
+		slog.Int("estimatedTokens", compressedSize)) // 1 char ≈ 1 token for base64
 
 	return compressed, "image/jpeg", true
 }

@@ -1,5 +1,49 @@
 # Memoh-v2 更新日志
 
+## [2026-03-19] WeCom 消息隔离 + 心跳任务隔离 + 上下文超限修复
+
+### WeCom 消息串扰修复
+**问题**: 用户 A 的消息被回复给用户 B；单聊用户共享路由；`/new` 清空所有用户历史
+
+**核心修复**:
+- `internal/channel/adapters/wecom/adapter.go`: 单聊时用 `From.UserID` 作为 `Conversation.ID`（原 `ChatID` 为空字符串）
+- `internal/channel/inbound/channel.go`: 禁用 `broadcastToOtherChannels` 跨用户广播
+- `internal/channel/inbound/channel.go`: 修复 debounce key 为 `botID:Conversation.ID`
+- `internal/message/service.go` + `sqlc/messages.sql.go`: 新增 `DeleteByRoute()` 接口
+- `cmd/agent/main.go`: 注入 `routeService` 到 WeCom adapter
+
+**身份字段补全**:
+- `from_user_id`, `user_id`, `sender_name`, `corp_id`, `chat_type`, `is_group`, `req_id`
+
+### 心跳任务隔离
+**问题**: 心跳维护内容混入用户回复（"收到心跳维护任务..."）
+
+**修复**:
+- `internal/conversation/flow/resolver.go`: 心跳任务设置 `MaxContextLoadTime: -1`，**禁止加载**用户历史
+- `internal/conversation/flow/resolver.go`: 心跳任务**禁止存储**结果到 `bot_history_messages`
+- 数据清理: 删除 `route_id IS NULL` 的 11 条心跳污染消息
+
+### 上下文大小超限修复
+**问题**: `request (288494 tokens) exceeds the available context size (262144 tokens)`
+
+**原因**: llama-server 实际仅支持 256K（模型 `n_ctx_train=262144`），但代码按 512K 配置
+
+**修复**:
+- `internal/conversation/flow/resolver.go`: `maxTotalTokens` 250000 → **150000**
+- `internal/settings/types.go`: `DefaultDMHistoryLimit` 20 → **10**；`DefaultChannelHistoryLimit` 12 → **6**
+
+**场景矩阵**:
+| 场景 | Conversation.ID | 历史隔离 |
+|------|----------------|---------|
+| 用户 A 单聊 | A 的 userid | ✅ 独立 |
+| 用户 B 单聊 | B 的 userid | ✅ 独立 |
+| 用户 A 在群 G | 群 chatid | ✅ 独立 |
+| Heartbeat | botID（无状态） | ✅ 不加载/不存储 |
+
+**详细文档**: `docs/wecom-isolation-and-heartbeat-fix-2026-03-19.md`
+
+---
+
 ## [2026-03-19] Kimi Code 多模态支持修复
 
 ### 问题
