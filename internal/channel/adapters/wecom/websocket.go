@@ -38,6 +38,9 @@ const (
 	// WeCom 通常响应很快，3 秒足够，超时后继续处理队列
 	ReplyAckTimeout = 3 * time.Second
 
+	// Upload ack timeout - 媒体上传命令等待 ACK 的超时时间
+	UploadAckTimeout = 15 * time.Second
+
 	// Max reply queue size per req_id
 	MaxReplyQueueSize = 100
 
@@ -422,14 +425,24 @@ func (c *WebSocketClient) readMessage(ctx context.Context) error {
 	handlerCtx := context.WithoutCancel(ctx)
 	switch msg.Cmd {
 	case CmdMsgCallback:
-		if err := c.handler(handlerCtx, &msg); err != nil {
-			c.logger.Error("handle message callback failed", slog.Any("error", err))
-		}
+		// Run handler in a goroutine so the read loop is NOT blocked.
+		// This is critical for upload ACK delivery: if the handler blocks
+		// (e.g. during LLM streaming + media upload), the read loop must
+		// remain free to receive upload ACK frames from WeCom.
+		msgCopy := msg
+		go func() {
+			if err := c.handler(handlerCtx, &msgCopy); err != nil {
+				c.logger.Error("handle message callback failed", slog.Any("error", err))
+			}
+		}()
 
 	case CmdEventCallback:
-		if err := c.handler(handlerCtx, &msg); err != nil {
-			c.logger.Error("handle event callback failed", slog.Any("error", err))
-		}
+		msgCopy := msg
+		go func() {
+			if err := c.handler(handlerCtx, &msgCopy); err != nil {
+				c.logger.Error("handle event callback failed", slog.Any("error", err))
+			}
+		}()
 
 	case "":
 		// No cmd: could be ack for reply, heartbeat, or subscription
@@ -491,6 +504,8 @@ func (c *WebSocketClient) handleReplyAck(reqID string, frame WebsocketMessage, p
 			slog.Time("ack_time", ackReceiveTime))
 		if queue != nil && len(queue) > 0 {
 			queue[0].Reject(fmt.Errorf("reply failed: %s (code: %d)", frame.ErrMsg, frame.ErrCode))
+		} else if pending.Reject != nil {
+			pending.Reject(fmt.Errorf("request failed: %s (code: %d)", frame.ErrMsg, frame.ErrCode))
 		}
 	} else {
 		c.logger.Info("[PERF] reply ack received",
@@ -498,6 +513,8 @@ func (c *WebSocketClient) handleReplyAck(reqID string, frame WebsocketMessage, p
 			slog.Time("ack_time", ackReceiveTime))
 		if queue != nil && len(queue) > 0 {
 			queue[0].Resolve(frame)
+		} else if pending.Resolve != nil {
+			pending.Resolve(frame)
 		}
 	}
 
@@ -757,6 +774,82 @@ func (c *WebSocketClient) SendStream(ctx context.Context, reqID string, body Str
 			go c.processReplyQueue(reqID)
 		}
 	})
+}
+
+// SendAndWait sends a WebSocket frame directly (bypassing the reply queue) and waits
+// for the ACK response. It returns the full ACK frame so callers can parse fields
+// like upload_id or media_id from the body. Used for media upload commands.
+func (c *WebSocketClient) SendAndWait(ctx context.Context, reqID string, body interface{}, cmd string, timeout time.Duration) (WebsocketMessage, error) {
+	c.mu.RLock()
+	conn := c.conn
+	connected := c.connected
+	c.mu.RUnlock()
+
+	if !connected || conn == nil {
+		return WebsocketMessage{}, fmt.Errorf("websocket not connected")
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return WebsocketMessage{}, fmt.Errorf("marshal upload body: %w", err)
+	}
+
+	frame := WebsocketMessage{
+		Cmd:     cmd,
+		Headers: MessageHeaders{ReqID: reqID},
+		Body:    bodyBytes,
+	}
+
+	doneCh := make(chan WebsocketMessage, 1)
+	errCh := make(chan error, 1)
+	var once sync.Once
+
+	resolve := func(msg WebsocketMessage) {
+		once.Do(func() { doneCh <- msg })
+	}
+	reject := func(e error) {
+		once.Do(func() { errCh <- e })
+	}
+
+	timer := time.AfterFunc(timeout, func() {
+		c.queueMu.Lock()
+		if _, exists := c.pendingAcks[reqID]; exists {
+			delete(c.pendingAcks, reqID)
+			c.queueMu.Unlock()
+			reject(fmt.Errorf("upload ack timeout after %s", timeout))
+		} else {
+			c.queueMu.Unlock()
+		}
+	})
+
+	c.queueMu.Lock()
+	c.pendingAcks[reqID] = &PendingAck{
+		Resolve: resolve,
+		Reject:  reject,
+		Timer:   timer,
+	}
+	c.queueMu.Unlock()
+
+	if err := conn.WriteJSON(frame); err != nil {
+		c.queueMu.Lock()
+		delete(c.pendingAcks, reqID)
+		c.queueMu.Unlock()
+		timer.Stop()
+		return WebsocketMessage{}, fmt.Errorf("write upload frame: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		c.queueMu.Lock()
+		delete(c.pendingAcks, reqID)
+		c.queueMu.Unlock()
+		timer.Stop()
+		return WebsocketMessage{}, ctx.Err()
+	case msg := <-doneCh:
+		return msg, nil
+	case e := <-errCh:
+		return WebsocketMessage{}, e
+	}
 }
 
 // processReplyQueue processes the reply queue for a specific req_id

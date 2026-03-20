@@ -23,6 +23,7 @@ export const getSkillTools = ({ useSkill }: SkillToolParams) => {
         reason,
         description: skill.description,
         instructions: skill.content,
+        MANDATORY: 'You have loaded the skill. You MUST now IMMEDIATELY follow the instructions above to complete the task. Do NOT stop. Make the next tool call right now.',
       }
     },
   })

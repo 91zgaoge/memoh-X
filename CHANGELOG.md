@@ -1,5 +1,24 @@
 # Memoh-v2 更新日志
 
+## [2026-03-21] WeCom 群聊文件发送修复
+
+### 问题
+在群聊中@bot使用 agent-fetch 技能生成报告后，文字能正常发送，但 MD 文件没有发送到群聊。
+
+### 根本原因
+1. **流重复 finalize**: 文字发送后 `s.sent = true`，附件推送时再次尝试 finalize 流被 WeCom 拒绝
+2. **Context 取消**: `chunkCh <- chunk` 阻塞发送未检查 context，attachment_delta 事件可能丢失
+
+### 修复
+- `internal/channel/adapters/wecom/stream.go`: 检测流已发送且只有附件时，直接调用 `uploadAttachments` + `sendPendingMediaWithMention`
+- `internal/channel/adapters/wecom/stream.go`: 新增 `sendPendingMediaWithMention` 函数，群聊@触发时自动 @提及请求者 (`<@userid> 已为您生成文件`)
+- `internal/conversation/flow/resolver.go`: 添加 context 取消检查
+- `internal/channel/inbound/channel.go`: 添加诊断日志
+
+**详细文档**: `docs/fix-wecom-group-file-send-2026-03-21.md`
+
+---
+
 ## [2026-03-20] MCP OAuth 支持 + Workspace 架构重构
 
 ### 概述

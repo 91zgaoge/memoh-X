@@ -14,6 +14,7 @@ import {
   AgentParams,
   AgentSkill,
   allActions,
+  MCPConnection,
   Schedule,
   SYSTEM_SAFE_PROVIDERS,
 } from './types'
@@ -30,11 +31,11 @@ import {
 } from './utils/attachments'
 import type { ContainerFileAttachment } from './types/attachment'
 import { withRetry, isRetryableLLMError } from './utils/retry'
-// // import { getMCPTools } from './tools/mcp'  // Disabled for troubleshooting  // Disabled for troubleshooting
+import { getMCPTools } from './tools/mcp'
 import { getTools } from './tools'
 import { wrapToolsWithLoopDetection, clearLoopDetectionState } from './tools/loop-detection'
 import { buildIdentityHeaders } from './utils/headers'
-import { createTierTools } from './tools/tier'
+import { createTierTools, getEnabledExtendedTools } from './tools/tier'
 import { normalizeBaseUrl } from './utils/url'
 import {
   truncateToolResult,
@@ -322,21 +323,71 @@ export const createAgent = (
     })
   }
 
-  // MCP disabled for troubleshooting
-  // Create tier tools once per agent instance so enabled-tools state is
-  // scoped to this session and persists across turns (but not across agents).
-  const tier = createTierTools({ auth, identity, fetch })
+  // Cache builtin MCP tool definitions to avoid repeated HTTP round-trips.
+  const mcpToolCache: {
+    tools: ToolSet
+    close: () => Promise<void>
+    extKey: string
+    expiry: number
+  } = { tools: {}, close: async () => {}, extKey: '', expiry: 0 }
 
   const getAgentTools = async (sessionId?: string) => {
+    const baseUrl = normalizeBaseUrl(auth.baseUrl)
+    const botId = identity.botId.trim()
+    if (!baseUrl || !botId) {
+      return {
+        tools: {} as ToolSet,
+        toolNames: [] as string[],
+        close: async () => {},
+      }
+    }
+    const baseHeaders = buildIdentityHeaders(identity, auth)
+    const enabledExt = getEnabledExtendedTools()
+    const extKey = enabledExt.join(',')
+    const builtinHeaders = enabledExt.length > 0
+      ? { ...baseHeaders, 'X-Memoh-Include-Tools': extKey }
+      : baseHeaders
+
+    let mcpTools: ToolSet
+    let closeMCP: () => Promise<void>
+
+    const cacheHit = mcpToolCache.expiry > Date.now()
+      && mcpToolCache.extKey === extKey
+      && Object.keys(mcpToolCache.tools).length > 0
+
+    if (!cacheHit) {
+      await mcpToolCache.close().catch(() => {})
+      const builtinConn: MCPConnection = {
+        type: 'http', name: 'builtin',
+        url: `${baseUrl}/bots/${botId}/tools`,
+        headers: builtinHeaders,
+      }
+      const res = await getMCPTools([builtinConn], { auth, fetch, botId })
+      mcpToolCache.tools = res.tools
+      mcpToolCache.close = res.close
+      mcpToolCache.extKey = extKey
+      mcpToolCache.expiry = Date.now() + SYSTEM_FILE_CACHE_TTL_MS
+    }
+
+    if (mcpConnections.length > 0) {
+      const ext = await getMCPTools(mcpConnections, { auth, fetch, botId })
+      mcpTools = { ...mcpToolCache.tools, ...ext.tools }
+      closeMCP = ext.close
+    } else {
+      mcpTools = mcpToolCache.tools
+      closeMCP = async () => {}
+    }
+
     const tools = getTools(allowedActions, { fetch, model: modelConfig, backgroundModel: backgroundModelConfig, identity, auth, enableSkill, mcpConnections, registry, teamMembers, callDepth })
-    const { list_available_tools, enable_tools } = tier
-    const merged = { list_available_tools, enable_tools, ...tools } as ToolSet
+    const tierTools = createTierTools({ auth, identity, fetch })
+    const merged = { ...tierTools, ...mcpTools, ...tools } as ToolSet
     const toolNames = Object.keys(merged)
     const wrappedTools = sessionId ? wrapToolsWithLoopDetection(merged, sessionId) : merged
     return {
       tools: wrappedTools,
       toolNames,
       close: async () => {
+        await closeMCP()
         if (sessionId) clearLoopDetectionState(sessionId)
       },
     }
@@ -826,146 +877,258 @@ export const createAgent = (
     const systemPrompt = await generateSystemPrompt('full', streamToolNames)
     const nonSystemMessages = sanitizeMessages(input.messages).filter((msg) => (msg as Record<string, unknown>).role !== 'system')
     const messages = [
-      { role: 'system', content: systemPrompt },
+      { role: 'system' as const, content: systemPrompt },
       ...nonSystemMessages,
-      userPrompt
+      userPrompt,
     ]
     console.log('[Agent stream] Built messages:', messages.length)
 
     yield { type: 'agent_start', input }
 
+    let closeCalled = false
+    const safeClose = async () => { if (!closeCalled) { closeCalled = true; await close() } }
+
+    const finalState: { messages: ModelMessage[]; reasoning: string[]; usage: LanguageModelUsage | null } = {
+      messages: [], reasoning: [], usage: null,
+    }
+    const writtenFiles: string[] = []
+    const textAttachments: ContainerFileAttachment[] = []
+    const extractor = new AttachmentsStreamExtractor()
+    let accumulatedVisibleText = ''
+    let hadToolCalls = false
+    let useSkillCalled = false   // true if use_skill was called in this stream
+    let nonSkillToolCalled = false // true if any non-use_skill tool was called after use_skill
+    let textAfterToolCall = false  // true if any text-delta was yielded AFTER a tool-call
+
     try {
-      // Direct fetch to LLM API (bypass ai SDK due to Bun compatibility issues)
-      const isAnthropicFormat = (modelConfig as any).clientType === 'kimi-coding'
+      yield { type: 'text_start' }
 
-      // Serialize message content to Anthropic content blocks format (for image support)
-      const serializeContentForAnthropic = (content: unknown): unknown => {
-        if (typeof content === 'string') return content
-        if (!Array.isArray(content)) return String(content)
-        return content.map((part: any) => {
-          if (part.type === 'image') {
-            return {
-              type: 'image',
-              source: { type: 'base64', media_type: part.mediaType || 'image/jpeg', data: part.image },
-            }
+      // AbortController allows loop detection to hard-stop the stream
+      const abortCtrl = new AbortController()
+
+      // Wrap each tool to abort the entire stream when a loop is detected
+      const toolsWithAbort: typeof tools = {} as typeof tools
+      for (const [name, t] of Object.entries(tools)) {
+        if (t && typeof (t as any).execute === 'function') {
+          const orig = (t as any).execute
+          ;(toolsWithAbort as any)[name] = {
+            ...t,
+            execute: async (...args: any[]) => {
+              try {
+                return await orig(...args)
+              } catch (err) {
+                if (err instanceof Error && err.message.startsWith('[LoopDetected]')) {
+                  console.warn('[Agent stream] Loop detected, aborting stream:', err.message)
+                  abortCtrl.abort(err.message)
+                }
+                throw err
+              }
+            },
           }
-          return part
-        })
-      }
-
-      // Serialize message content to OpenAI image_url format (for image support)
-      const serializeContentForOpenAI = (content: unknown): unknown => {
-        if (typeof content === 'string') return content
-        if (!Array.isArray(content)) return String(content)
-        return content.map((part: any) => {
-          if (part.type === 'image') {
-            const mimeType = part.mediaType || 'image/jpeg'
-            return {
-              type: 'image_url',
-              image_url: { url: `data:${mimeType};base64,${part.image}` },
-            }
-          }
-          return part
-        })
-      }
-
-      console.log('[Agent stream] Starting fetch to', modelConfig.baseUrl)
-
-      let fetchUrl: string
-      let fetchHeaders: Record<string, string>
-      let fetchBody: Record<string, unknown>
-
-      if (isAnthropicFormat) {
-        // Kimi Code uses Anthropic Messages API format
-        fetchUrl = `${modelConfig.baseUrl.replace(/\/$/, '')}/messages`
-        fetchHeaders = {
-          'Content-Type': 'application/json',
-          'x-api-key': modelConfig.apiKey,
-          'anthropic-version': '2023-06-01',
-          'X-Kimi-Client': 'kimi-cli',
-          'X-Kimi-Client-Version': '1.0.0',
-        }
-        const systemMsg = messages.find((m: any) => m.role === 'system')
-        const nonSystemMsgs = messages.filter((m: any) => m.role !== 'system')
-        fetchBody = {
-          model: modelConfig.modelId,
-          system: typeof systemMsg?.content === 'string' ? systemMsg.content : '',
-          messages: nonSystemMsgs.map((m: any) => ({
-            role: m.role,
-            content: serializeContentForAnthropic(m.content),
-          })),
-          max_tokens: 8192,
-        }
-      } else {
-        // Standard OpenAI Chat Completions API format
-        fetchUrl = `${modelConfig.baseUrl.replace(/\/$/, '')}/chat/completions`
-        fetchHeaders = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${modelConfig.apiKey}`,
-        }
-        fetchBody = {
-          model: modelConfig.modelId,
-          messages: messages.map((m: any) => ({
-            role: m.role,
-            content: serializeContentForOpenAI(m.content),
-          })),
-          stream: false,
+        } else {
+          ;(toolsWithAbort as any)[name] = t
         }
       }
 
-      console.log('[Agent stream] Fetch URL:', fetchUrl)
-      const response = await fetch(fetchUrl, {
-        method: 'POST',
-        headers: fetchHeaders,
-        body: JSON.stringify(fetchBody),
+      console.log('[Agent stream] Starting streamText, tools count:', Object.keys(tools).length)
+      const { fullStream } = streamText({
+        model,
+        messages,
+        maxSteps: 30,
+        abortSignal: abortCtrl.signal,
+        tools: toolsWithAbort,
+        providerOptions,
+        onFinish: async ({ usage, reasoning, response }) => {
+          console.log('[Agent stream] streamText onFinish, steps:', response.messages?.length)
+          await safeClose()
+          finalState.usage = usage as never
+          finalState.reasoning = reasoning.map((part) => part.text)
+          finalState.messages = response.messages
+        },
       })
 
-      if (!response.ok) {
-        const errorText = await response.text()
-        console.error(`[Agent stream] LLM API error ${response.status}:`, errorText)
-        throw new Error(`LLM API error: ${response.status} ${errorText}`)
+      console.log('[Agent stream] Entering fullStream loop')
+      for await (const chunk of fullStream) {
+        if (chunk.type !== 'text-delta') console.log('[Agent stream] chunk type:', chunk.type)
+        if (chunk.type === 'text-delta') {
+          const { visibleText, attachments } = extractor.push(chunk.text)
+          if (visibleText) {
+            yield { type: 'text_delta', delta: visibleText }
+            accumulatedVisibleText += visibleText
+            if (hadToolCalls) textAfterToolCall = true
+          }
+          textAttachments.push(...attachments)
+        } else if (chunk.type === 'tool-call') {
+          hadToolCalls = true
+          textAfterToolCall = false // reset: need text AFTER this tool call
+          if (chunk.toolName === 'use_skill') {
+            useSkillCalled = true
+          } else if (useSkillCalled) {
+            nonSkillToolCalled = true // a real skill tool was called after use_skill
+          }
+          console.log('[Agent stream] tool-call:', chunk.toolName, JSON.stringify((chunk as any).args ?? (chunk as any).input ?? {}).slice(0, 200))
+          // Emit tool_call_start so the Go server's idle timer stays alive during tool execution
+          yield {
+            type: 'tool_call_start' as const,
+            toolName: chunk.toolName,
+            toolCallId: chunk.toolCallId ?? '',
+            input: (chunk as any).args ?? (chunk as any).input ?? {},
+          }
+        } else if (chunk.type === 'tool-result') {
+          const input = (chunk as any).input ?? (chunk as any).args ?? {}
+          const outputStr = JSON.stringify(chunk.output).slice(0, 200)
+          console.log('[Agent stream] tool-result:', chunk.toolName, 'input:', JSON.stringify(input).slice(0, 200), 'success:', isWriteSuccess(chunk.output), outputStr)
+          // Emit tool_call_end to close the tool call on the server side
+          yield {
+            type: 'tool_call_end' as const,
+            toolName: chunk.toolName,
+            toolCallId: chunk.toolCallId ?? '',
+            input,
+            result: chunk.output,
+          }
+          if (FILE_WRITE_TOOLS.has(chunk.toolName) && isWriteSuccess(chunk.output)) {
+            const writePath = extractWritePath(input)
+            console.log('[Agent stream] write tool path:', writePath, 'deliverable:', writePath ? isDeliverableWrite(writePath) : false)
+            if (writePath && isDeliverableWrite(writePath)) {
+              writtenFiles.push(writePath)
+            }
+          }
+        }
       }
 
-      const data = await response.json()
-      const content = isAnthropicFormat
-        ? (data.content?.find((b: any) => b.type === 'text')?.text || '')
-        : (data.choices?.[0]?.message?.content || '')
-
-      // Simulate streaming
-      yield { type: 'text_start' }
-      const chunkSize = 50
-      for (let i = 0; i < content.length; i += chunkSize) {
-        yield { type: 'text_delta', delta: content.slice(i, i + chunkSize) }
+      // Flush any remaining buffered text (e.g. partial tag match at stream end)
+      const { visibleText: tail, attachments: tailAtts } = extractor.flushRemainder()
+      if (tail) {
+        yield { type: 'text_delta', delta: tail }
+        accumulatedVisibleText += tail
       }
+      textAttachments.push(...tailAtts)
+
+      // Recovery: model made tool calls but task was not completed (no file written / no real output).
+      // Two common causes:
+      //   A) use_skill was called → skill enabled → but its tools weren't in toolsWithAbort
+      //      (tools were fixed at stream start, before the skill was enabled). Model may have
+      //      produced a brief "planning" message but never actually invoked the skill tools.
+      //   B) Weaker model (Qwen) called web_search/etc, got results, then generated empty text.
+      // Fix: reload tools via getAgentTools (picks up newly enabled skill tools), then retry.
+      // The retry carries all prior tool results as context so the model can synthesize.
+      const skillLoadedButUnused = useSkillCalled && !nonSkillToolCalled && writtenFiles.length === 0
+      const emptyOutputAfterTools = accumulatedVisibleText.trim().length === 0 && writtenFiles.length === 0 && hadToolCalls
+      // Tools were called but model generated nothing AFTER the last tool result (only pre-tool planning text)
+      const noOutputAfterTools = hadToolCalls && !textAfterToolCall && writtenFiles.length === 0
+      if (emptyOutputAfterTools || skillLoadedButUnused || noOutputAfterTools) {
+        console.log('[Agent stream] Retry triggered:', { emptyOutputAfterTools, skillLoadedButUnused, noOutputAfterTools })
+        let retryClose: (() => Promise<void>) | null = null
+        try {
+          // Reload tools — this picks up any skills that were enabled via use_skill above
+          const { tools: freshTools, close: rc } = await getAgentTools(sessionId + '-retry')
+          retryClose = rc
+          // Remove use_skill from retry tools — skill already loaded, calling it again just loops
+          const retryTools: ToolSet = {}
+          for (const [name, t] of Object.entries(freshTools as ToolSet)) {
+            if (name !== 'use_skill' && name !== 'discover_skills') retryTools[name] = t
+          }
+          const retryMessages: ModelMessage[] = [
+            ...messages,
+            ...((finalState.messages ?? []) as ModelMessage[]),
+            {
+              role: 'user',
+              content: [{
+                type: 'text',
+                text: skillLoadedButUnused
+                  ? '技能已加载成功，请立即使用新加载的技能工具（如 fetch_url 等）执行任务，然后将结果整理成完整回复。'
+                  : '请基于以上工具返回的结果，立即完成任务并给出完整回复。如果信息不够，请如实说明原因。',
+              }],
+            } as ModelMessage,
+          ]
+          const { fullStream: retryStream } = streamText({
+            model,
+            messages: retryMessages,
+            maxSteps: 15,
+            tools: retryTools,
+            providerOptions,
+          })
+          for await (const rc2 of retryStream) {
+            if (rc2.type !== 'text-delta') console.log('[Agent stream] retry chunk type:', rc2.type)
+            if (rc2.type === 'tool-call') console.log('[Agent stream] retry tool-call:', rc2.toolName, JSON.stringify((rc2 as any).args ?? {}).slice(0, 200))
+            if (rc2.type === 'tool-result') console.log('[Agent stream] retry tool-result:', rc2.toolName, JSON.stringify(rc2.output).slice(0, 300))
+            if (rc2.type === 'text-delta') {
+              const { visibleText, attachments } = extractor.push(rc2.text)
+              if (visibleText) {
+                yield { type: 'text_delta', delta: visibleText }
+                accumulatedVisibleText += visibleText
+              }
+              textAttachments.push(...attachments)
+            } else if (rc2.type === 'tool-result') {
+              if (FILE_WRITE_TOOLS.has(rc2.toolName) && isWriteSuccess(rc2.output)) {
+                const writePath = extractWritePath((rc2 as any).input ?? {})
+                if (writePath && isDeliverableWrite(writePath)) writtenFiles.push(writePath)
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[Agent stream] Retry synthesis error:', e)
+        } finally {
+          if (retryClose) await retryClose().catch(() => {})
+        }
+
+        // Second pass: synthesis-only (NO tools) — forces model to output text
+        // Triggers when: no text at all OR only pre-tool planning text (no text after tools), and no file written.
+        const needsSynthesisPass = (accumulatedVisibleText.trim().length === 0 || !textAfterToolCall) && writtenFiles.length === 0
+        if (needsSynthesisPass) {
+          console.log('[Agent stream] Synthesis-only pass triggered (no tools)', { accLen: accumulatedVisibleText.length, textAfterToolCall })
+          try {
+            // Collect all messages including retry context
+            const synthMessages: ModelMessage[] = [
+              ...messages,
+              ...((finalState.messages ?? []) as ModelMessage[]),
+              {
+                role: 'user',
+                content: [{
+                  type: 'text',
+                  text: '根据以上所有信息，请直接输出最终回复给用户，不要调用任何工具。如果没有足够信息，请如实说明并给出已了解的内容。',
+                }],
+              } as ModelMessage,
+            ]
+            const { fullStream: synthStream } = streamText({
+              model,
+              messages: synthMessages,
+              maxSteps: 1,
+              // No tools — force text-only response
+              providerOptions,
+            })
+            for await (const sc of synthStream) {
+              if (sc.type === 'text-delta') {
+                const { visibleText, attachments } = extractor.push(sc.text)
+                if (visibleText) {
+                  yield { type: 'text_delta', delta: visibleText }
+                  accumulatedVisibleText += visibleText
+                }
+                textAttachments.push(...attachments)
+              }
+            }
+          } catch (e) {
+            console.warn('[Agent stream] Synthesis-only pass error:', e)
+          }
+        }
+
+        // Final fallback if all passes produced nothing
+        if (accumulatedVisibleText.trim().length === 0 && writtenFiles.length === 0) {
+          const fallback = '抱歉，获取工具数据后模型未能生成有效回复，请换一种描述方式重试。'
+          yield { type: 'text_delta', delta: fallback }
+          accumulatedVisibleText = fallback
+        }
+      }
+
       yield { type: 'text_end', metadata: {} }
+      await safeClose()
 
-      await close()
-
-      // Build final messages with assistant response
-      const assistantMessage: ModelMessage = {
-        role: 'assistant',
-        content,
-      }
-      const finalMessages = [...messages, assistantMessage] as ModelMessage[]
-
-      const { messages: strippedMessages } = stripAttachmentsFromMessages(finalMessages)
-      const cleanedMessages = stripReasoningFromMessages(
-        truncateMessagesForTransport(strippedMessages),
-      ) as ModelMessage[]
-
-      yield {
-        type: 'agent_end',
-        messages: cleanedMessages,
-        reasoning: [],
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: content.length },
-        skills: getEnabledSkills(),
-      }
     } catch (err) {
       console.error('[Agent stream] Error:', err)
       yield { type: 'text_delta', delta: `Error: ${err instanceof Error ? err.message : String(err)}` }
       yield { type: 'text_end', metadata: {} }
+      await safeClose()
 
-      // Even on error, yield agent_end with current messages
       const { messages: strippedMessages } = stripAttachmentsFromMessages(messages as ModelMessage[])
       const cleanedMessages = stripReasoningFromMessages(
         truncateMessagesForTransport(strippedMessages),
@@ -978,6 +1141,87 @@ export const createAgent = (
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         skills: getEnabledSkills(),
       }
+      return
+    }
+
+    // Recovery: if model referenced file paths in <attachments> but never called `write`,
+    // automatically write the model's text response as the file content.
+    // This handles weak models that generate content in text but skip the write tool call.
+    const hallucinatedPaths = textAttachments.filter(a => !writtenFiles.includes(a.path))
+    if (hallucinatedPaths.length > 0 && accumulatedVisibleText.trim().length > 20) {
+      console.log('[Agent stream] Recovery: attempting to write hallucinated paths from text content:', hallucinatedPaths.map(a => a.path))
+      for (const att of hallucinatedPaths) {
+        try {
+          const body = JSON.stringify({
+            jsonrpc: '2.0',
+            id: `recovery-write-${att.path}`,
+            method: 'tools/call',
+            params: { name: 'write', arguments: { path: att.path, content: accumulatedVisibleText.trim() } },
+          })
+          const resp = await fetch(mcpToolsURL, { method: 'POST', headers: mcpHeaders(), body })
+          if (resp.ok) {
+            const result = await resp.json().catch(() => ({}))
+            const isError = result?.result?.isError === true
+            if (!isError) {
+              writtenFiles.push(att.path)
+              console.log('[Agent stream] Recovery write succeeded:', att.path)
+            } else {
+              console.warn('[Agent stream] Recovery write returned error:', att.path, JSON.stringify(result).slice(0, 200))
+            }
+          } else {
+            console.warn('[Agent stream] Recovery write HTTP error:', att.path, resp.status)
+          }
+        } catch (e) {
+          console.warn('[Agent stream] Recovery write failed:', att.path, (e as Error)?.message ?? e)
+        }
+      }
+    }
+
+    // Collect file attachments: only paths actually written by tools are trusted.
+    // Paths mentioned in <attachments> text blocks are cross-checked against writtenFiles
+    // to avoid emitting hallucinated paths that were never created on disk.
+    const writtenSet = new Set(writtenFiles)
+    const verifiedTextAtts = textAttachments.filter(a => {
+      if (writtenSet.has(a.path)) return true
+      console.warn('[Agent stream] Ignoring hallucinated attachment path (not written by tool):', a.path)
+      return false
+    })
+
+    const allFiles = dedupeAttachments([
+      ...writtenFiles.map((path): ContainerFileAttachment => ({ type: 'file', path })),
+      ...verifiedTextAtts,
+    ]) as ContainerFileAttachment[]
+
+    if (allFiles.length > 0) {
+      console.log('[Agent stream] Emitting attachment_delta:', allFiles.map(a => a.path))
+      yield { type: 'attachment_delta', attachments: allFiles }
+    }
+
+    // Also scan final messages for any <attachments> blocks (e.g. from tool result text)
+    // Only emit paths that were actually written by a tool.
+    const { messages: strippedMessages, attachments: msgAtts } = stripAttachmentsFromMessages(finalState.messages)
+    const extraFiles = (msgAtts as ContainerFileAttachment[]).filter(a => {
+      if (allFiles.some(x => x.path === a.path)) return false
+      if (!writtenSet.has(a.path)) {
+        console.warn('[Agent stream] Ignoring hallucinated attachment in messages (not written by tool):', a.path)
+        return false
+      }
+      return true
+    })
+    if (extraFiles.length > 0) {
+      yield { type: 'attachment_delta', attachments: extraFiles }
+    }
+
+    const cleanedMessages = stripReasoningFromMessages(
+      truncateMessagesForTransport(strippedMessages),
+    ) as ModelMessage[]
+
+    yield {
+      type: 'agent_end',
+      messages: cleanedMessages,
+      reasoning: finalState.reasoning,
+      usage: normalizeUsage(finalState.usage),
+      skills: getEnabledSkills(),
     }
   }
 

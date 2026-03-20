@@ -2,9 +2,6 @@ package wecom
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -15,6 +12,13 @@ import (
 
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel"
 )
+
+// pendingMedia holds a media_id to be sent as a separate media message after the final stream message.
+type pendingMedia struct {
+	mediaID   string
+	mediaType string
+	attType   channel.AttachmentType
+}
 
 // OutboundStream implements channel.OutboundStream for WeCom
 // Supports real-time streaming output using WeCom's stream message format
@@ -60,8 +64,14 @@ type OutboundStream struct {
 	lastThinkingSendTime time.Time     // 上次思考阶段发送时间
 	thinkingSendInterval time.Duration // 思考阶段发送间隔
 
-	// Attachments to be sent with final message (via msg_item)
+	// Attachments to be sent with final message
 	attachments []channel.Attachment
+
+	// pendingMediaMsgs holds uploaded media to be sent after the final stream message
+	pendingMediaMsgs []pendingMedia
+
+	// pendingTextFallbacks holds text content to send inline when file upload fails
+	pendingTextFallbacks []string
 
 	// ReceivedAt is the time when the message was received, used to calculate total response time
 	receivedAt time.Time
@@ -310,6 +320,24 @@ func (s *OutboundStream) Push(ctx context.Context, event channel.StreamEvent) er
 			s.mu.Unlock()
 			s.logger.Info("captured attachments for final message",
 				slog.Int("attachment_count", len(event.Final.Message.Attachments)))
+		}
+
+		// CRITICAL: If stream was already sent and this is an attachments-only event,
+		// directly upload and send files without trying to finalize the stream again.
+		// This happens when sendSharedFileAttachments pushes a StreamEventFinal after
+		// the main text was already sent.
+		if s.sent.Load() {
+			// Check if this is attachments-only (no new text)
+			hasNewText := event.Final != nil && event.Final.Message.Text != "" && event.Final.Message.Text != s.lastSentContent
+			if !hasNewText && len(s.attachments) > 0 {
+				s.logger.Info("stream already sent, handling attachments-only event directly",
+					slog.Int("attachment_count", len(s.attachments)))
+				// Upload attachments directly
+				s.uploadAttachments(ctx, s.attachments)
+				// Send the uploaded files via CmdSendMsg (not stream)
+				s.sendPendingMediaWithMention(ctx, "")
+				return nil
+			}
 		}
 
 		var finalContent string
@@ -583,27 +611,22 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 	}
 
 	// Send stream update using WeCom stream format
-	// Build msg_item for attachments when finish=true (SDK限制：msg_item仅在finish=true时有效)
-	var msgItems []ReplyMsgItem
+	// Upload attachments when finish=true and queue them for sending after the final message
 	if finish {
 		s.mu.Lock()
 		attachments := s.attachments
 		s.mu.Unlock()
 		if len(attachments) > 0 {
-			msgItems = s.buildMsgItemsFromAttachments(attachments)
-			s.logger.Info("building msg_item for attachments",
-				slog.Int("attachment_count", len(attachments)),
-				slog.Int("msg_item_count", len(msgItems)))
+			s.uploadAttachments(ctx, attachments)
 		}
 	}
 
 	body := StreamMsgBody{
 		MsgType: MsgTypeStream,
 		Stream: StreamResponse{
-			ID:       streamID,
-			Finish:   finish,
-			Content:  truncatedContent, // Send FULL content, not delta
-			MsgItem:  msgItems,         // 仅在finish=true时有效，最多10个图片
+			ID:      streamID,
+			Finish:  finish,
+			Content: truncatedContent, // Send FULL content, not delta
 		},
 	}
 
@@ -706,6 +729,8 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 				slog.Duration("send_time", totalSendTime),
 				slog.Duration("total_elapsed", totalElapsed),
 				slog.Int("send_count", s.sendCount))
+			// Send any pending media messages (uploaded attachments)
+			s.sendPendingMedia(ctx)
 		} else {
 			// [PERF] 记录中间消息发送统计
 			s.mu.Lock()
@@ -1162,82 +1187,245 @@ func (s *OutboundStream) sendStandaloneMessage(ctx context.Context, content stri
 	return wsClient.SendReply(ctx, reqID, body, CmdSendMsg)
 }
 
-// ========== msg_item 图片发送支持 ==========
+// ========== 媒体上传发送支持 ==========
 
-// buildMsgItemsFromAttachments 将附件转换为 ReplyMsgItem 列表
-// SDK限制：最多10个图片，每个图片base64编码前最大10M，支持JPG、PNG格式
-func (s *OutboundStream) buildMsgItemsFromAttachments(attachments []channel.Attachment) []ReplyMsgItem {
-	var msgItems []ReplyMsgItem
-	const maxImages = 10           // SDK限制：最多10个图片
-	const maxImageSize = 10 * 1024 * 1024 // 10MB limit before base64 encoding
-
-	for i, att := range attachments {
-		// 只处理图片类型附件
-		if att.Type != channel.AttachmentImage {
-			s.logger.Debug("skipping non-image attachment for msg_item",
-				slog.String("type", string(att.Type)),
-				slog.String("name", att.Name))
+// uploadAttachments uploads all attachments via UploadManager and stores media_ids in pendingMediaMsgs.
+func (s *OutboundStream) uploadAttachments(ctx context.Context, attachments []channel.Attachment) {
+	upMgr := NewUploadManager(s.wsClient, s.logger)
+	for _, att := range attachments {
+		if len(att.Data) == 0 {
+			s.logger.Warn("skipping attachment with no data", slog.String("name", att.Name))
 			continue
 		}
-
-		// 限制最多10个图片
-		if len(msgItems) >= maxImages {
-			s.logger.Warn("too many image attachments, truncating to 10",
-				slog.Int("total", len(attachments)))
-			break
-		}
-
-		// 获取图片数据
-		imageData := att.Data
-		if len(imageData) == 0 {
-			s.logger.Warn("image attachment has no data, skipping",
+		mediaType := attachmentTypeToMediaType(att.Type)
+		mediaID, err := upMgr.UploadMedia(ctx, att.Data, att.Name, mediaType)
+		if err != nil {
+			s.logger.Error("failed to upload attachment",
 				slog.String("name", att.Name),
-				slog.Int("index", i))
+				slog.String("media_type", mediaType),
+				slog.Any("error", err))
+			// Fallback: for text/markdown files, send content inline as text
+			ext := strings.ToLower(att.Name)
+			isTextFile := strings.HasSuffix(ext, ".md") || strings.HasSuffix(ext, ".txt") ||
+				strings.HasSuffix(ext, ".csv") || strings.HasSuffix(ext, ".json")
+			if isTextFile && len(att.Data) > 0 {
+				const maxInline = 3000
+				content := string(att.Data)
+				note := fmt.Sprintf("📎 **%s**（文件发送失败，以下为文件内容）\n\n", att.Name)
+				if len(content) > maxInline {
+					content = content[:maxInline] + "\n\n[…内容已截断]"
+				}
+				s.mu.Lock()
+				s.pendingTextFallbacks = append(s.pendingTextFallbacks, note+content)
+				s.mu.Unlock()
+				s.logger.Info("queued text fallback for failed upload", slog.String("name", att.Name))
+			}
 			continue
 		}
-
-		// 检查图片大小限制（base64编码前）
-		if len(imageData) > maxImageSize {
-			s.logger.Warn("image too large, skipping",
-				slog.String("name", att.Name),
-				slog.Int("size", len(imageData)),
-				slog.Int("max_size", maxImageSize))
-			continue
-		}
-
-		// 转换为Base64
-		base64Data := base64.StdEncoding.EncodeToString(imageData)
-
-		// 计算MD5
-		md5Hash := calculateMD5(imageData)
-
-		// 创建ReplyMsgItem
-		msgItem := ReplyMsgItem{
-			MsgType: MsgTypeImage,
-			Image: struct {
-				Base64 string `json:"base64"`
-				MD5    string `json:"md5"`
-			}{
-				Base64: base64Data,
-				MD5:    md5Hash,
-			},
-		}
-		msgItems = append(msgItems, msgItem)
-
-		s.logger.Info("added image to msg_item",
+		s.mu.Lock()
+		s.pendingMediaMsgs = append(s.pendingMediaMsgs, pendingMedia{
+			mediaID:   mediaID,
+			mediaType: mediaType,
+			attType:   att.Type,
+		})
+		s.mu.Unlock()
+		s.logger.Info("attachment uploaded for deferred send",
 			slog.String("name", att.Name),
-			slog.Int("index", i),
-			slog.Int("data_size", len(imageData)),
-			slog.Int("base64_size", len(base64Data)))
+			slog.String("media_id", mediaID))
 	}
-
-	return msgItems
 }
 
-// calculateMD5 计算数据的MD5哈希值（小写十六进制）
-func calculateMD5(data []byte) string {
-	hash := md5.Sum(data)
-	return hex.EncodeToString(hash[:])
+// sendPendingMedia sends each pending media_id as a separate CmdSendMsg message.
+// Also sends any pending text fallbacks (used when file upload fails).
+func (s *OutboundStream) sendPendingMedia(ctx context.Context) {
+	// Send text fallbacks first (for files whose upload failed)
+	s.mu.Lock()
+	textFallbacks := s.pendingTextFallbacks
+	s.pendingTextFallbacks = nil
+	s.mu.Unlock()
+	if len(textFallbacks) > 0 {
+		var fbChatID string
+		var fbChatType int
+		if s.chatType == "group" {
+			fbChatID = s.chatID
+			fbChatType = ChatTypeGroup
+		} else {
+			fbChatID = s.userID
+			fbChatType = ChatTypeSingle
+		}
+		for _, text := range textFallbacks {
+			reqID := generateReqID(CmdSendMsg)
+			body := SendMarkdownMsgBody{
+				MsgType:  MsgTypeMarkdown,
+				Markdown: MarkdownContent{Content: text},
+				ChatID:   fbChatID,
+				ChatType: fbChatType,
+			}
+			if err := s.wsClient.SendReply(ctx, reqID, body, CmdSendMsg); err != nil {
+				s.logger.Error("failed to send text fallback", slog.Any("error", err))
+			} else {
+				s.logger.Info("sent text fallback for failed upload", slog.Int("content_len", len(text)))
+			}
+		}
+	}
+
+	s.mu.Lock()
+	pending := s.pendingMediaMsgs
+	s.pendingMediaMsgs = nil
+	s.mu.Unlock()
+
+	if len(pending) == 0 {
+		return
+	}
+
+	// Determine target chatID and chat_type
+	var chatID string
+	var chatType int
+	if s.chatType == "group" {
+		chatID = s.chatID
+		chatType = ChatTypeGroup
+	} else {
+		chatID = s.userID
+		chatType = ChatTypeSingle
+	}
+
+	for _, pm := range pending {
+		ref := &MediaIDRef{MediaID: pm.mediaID}
+		body := SendMediaMsgBody{
+			MsgType:  pm.mediaType,
+			ChatID:   chatID,
+			ChatType: chatType,
+		}
+		switch pm.mediaType {
+		case MediaTypeImage:
+			body.Image = ref
+		case MediaTypeVoice:
+			body.Voice = ref
+		case MediaTypeVideo:
+			body.Video = ref
+		default:
+			body.File = ref
+		}
+		reqID := generateReqID(CmdSendMsg)
+		s.logger.Info("sending pending media message",
+			slog.String("media_id", pm.mediaID),
+			slog.String("media_type", pm.mediaType),
+			slog.String("chat_id", chatID))
+		if err := s.wsClient.SendReply(ctx, reqID, body, CmdSendMsg); err != nil {
+			s.logger.Error("failed to send pending media message",
+				slog.String("media_id", pm.mediaID),
+				slog.Any("error", err))
+		}
+	}
+}
+
+// sendPendingMediaWithMention sends pending media messages with optional @mention for group chats.
+// When the bot is responding to an @mention in a group chat, it will @mention the requesting user
+// when sending the file.
+func (s *OutboundStream) sendPendingMediaWithMention(ctx context.Context, extraText string) {
+	// Send text fallbacks first (for files whose upload failed)
+	s.mu.Lock()
+	textFallbacks := s.pendingTextFallbacks
+	s.pendingTextFallbacks = nil
+	s.mu.Unlock()
+
+	if len(textFallbacks) > 0 {
+		var fbChatID string
+		var fbChatType int
+		if s.chatType == "group" {
+			fbChatID = s.chatID
+			fbChatType = ChatTypeGroup
+		} else {
+			fbChatID = s.userID
+			fbChatType = ChatTypeSingle
+		}
+		for _, text := range textFallbacks {
+			reqID := generateReqID(CmdSendMsg)
+			body := SendMarkdownMsgBody{
+				MsgType:  MsgTypeMarkdown,
+				Markdown: MarkdownContent{Content: text},
+				ChatID:   fbChatID,
+				ChatType: fbChatType,
+			}
+			if err := s.wsClient.SendReply(ctx, reqID, body, CmdSendMsg); err != nil {
+				s.logger.Error("failed to send text fallback", slog.Any("error", err))
+			} else {
+				s.logger.Info("sent text fallback for failed upload", slog.Int("content_len", len(text)))
+			}
+		}
+	}
+
+	s.mu.Lock()
+	pending := s.pendingMediaMsgs
+	s.pendingMediaMsgs = nil
+	s.mu.Unlock()
+
+	if len(pending) == 0 {
+		return
+	}
+
+	// Determine target chatID and chat_type
+	var chatID string
+	var chatType int
+	if s.chatType == "group" {
+		chatID = s.chatID
+		chatType = ChatTypeGroup
+	} else {
+		chatID = s.userID
+		chatType = ChatTypeSingle
+	}
+
+	// For group chats triggered by @mention, send a @mention message first
+	if s.chatType == "group" && s.isMentioned && s.userID != "" {
+		mentionText := fmt.Sprintf("<@%s> 已为您生成文件", s.userID)
+		if extraText != "" {
+			mentionText = fmt.Sprintf("<@%s> %s", s.userID, extraText)
+		}
+		reqID := generateReqID(CmdSendMsg)
+		body := SendMarkdownMsgBody{
+			MsgType:  MsgTypeMarkdown,
+			Markdown: MarkdownContent{Content: mentionText},
+			ChatID:   chatID,
+			ChatType: chatType,
+		}
+		if err := s.wsClient.SendReply(ctx, reqID, body, CmdSendMsg); err != nil {
+			s.logger.Error("failed to send mention message", slog.Any("error", err))
+		} else {
+			s.logger.Info("sent mention message before file",
+				slog.String("user_id", s.userID),
+				slog.String("chat_id", chatID))
+		}
+	}
+
+	// Send all pending media files
+	for _, pm := range pending {
+		ref := &MediaIDRef{MediaID: pm.mediaID}
+		body := SendMediaMsgBody{
+			MsgType:  pm.mediaType,
+			ChatID:   chatID,
+			ChatType: chatType,
+		}
+		switch pm.mediaType {
+		case MediaTypeImage:
+			body.Image = ref
+		case MediaTypeVoice:
+			body.Voice = ref
+		case MediaTypeVideo:
+			body.Video = ref
+		default:
+			body.File = ref
+		}
+		reqID := generateReqID(CmdSendMsg)
+		s.logger.Info("sending pending media message (with mention support)",
+			slog.String("media_id", pm.mediaID),
+			slog.String("media_type", pm.mediaType),
+			slog.String("chat_id", chatID))
+		if err := s.wsClient.SendReply(ctx, reqID, body, CmdSendMsg); err != nil {
+			s.logger.Error("failed to send pending media message",
+				slog.String("media_id", pm.mediaID),
+				slog.Any("error", err))
+		}
+	}
 }
 
 // formatDuration formats a duration into a human-readable string

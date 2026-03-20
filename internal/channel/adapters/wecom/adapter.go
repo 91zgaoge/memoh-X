@@ -2,9 +2,6 @@ package wecom
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -474,7 +471,18 @@ func (a *Adapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, tar
 }
 
 // Send sends a message directly (non-streaming)
-// Supports text messages and image attachments via msg_item
+// getUploadManager returns an UploadManager for the given bot's WebSocket client.
+func (a *Adapter) getUploadManager(botID string) (*UploadManager, error) {
+	a.mu.RLock()
+	wsClient, exists := a.clients[botID]
+	a.mu.RUnlock()
+	if !exists || !wsClient.IsConnected() {
+		return nil, fmt.Errorf("websocket client not connected for bot %s", botID)
+	}
+	return NewUploadManager(wsClient, a.logger), nil
+}
+
+// Supports text messages and media attachments (uploaded via three-step media upload protocol)
 func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg channel.OutboundMessage) error {
 	// Get WebSocket client for this bot
 	a.mu.RLock()
@@ -514,34 +522,40 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 	// Build response content
 	content := msg.Message.Text
 	if content == "" && len(msg.Message.Attachments) > 0 {
-		content = "[图片]"
+		content = "[媒体文件]"
 	}
 
-	// Build msg_item for image attachments
-	var msgItems []ReplyMsgItem
-	for _, att := range msg.Message.Attachments {
-		if att.Type == channel.AttachmentImage && len(att.Data) > 0 {
-			// Convert image data to base64
-			base64Data := base64.StdEncoding.EncodeToString(att.Data)
-			// Calculate MD5
-			md5Hash := md5.Sum(att.Data)
-			md5Str := hex.EncodeToString(md5Hash[:])
-
-			msgItems = append(msgItems, ReplyMsgItem{
-				MsgType: MsgTypeImage,
-				Image: struct {
-					Base64 string `json:"base64"`
-					MD5    string `json:"md5"`
-				}{
-					Base64: base64Data,
-					MD5:    md5Str,
-				},
+	// Upload attachments and collect media_ids
+	type pendingMedia struct {
+		mediaID   string
+		mediaType string
+		attType   channel.AttachmentType
+	}
+	var pendingMediaList []pendingMedia
+	if len(msg.Message.Attachments) > 0 {
+		upMgr := NewUploadManager(wsClient, a.logger)
+		for _, att := range msg.Message.Attachments {
+			if len(att.Data) == 0 {
+				a.logger.Warn("[SEND] skipping attachment with no data", slog.String("name", att.Name))
+				continue
+			}
+			mediaType := attachmentTypeToMediaType(att.Type)
+			mediaID, err := upMgr.UploadMedia(ctx, att.Data, att.Name, mediaType)
+			if err != nil {
+				a.logger.Error("[SEND] failed to upload attachment",
+					slog.String("name", att.Name),
+					slog.String("media_type", mediaType),
+					slog.Any("error", err))
+				continue
+			}
+			pendingMediaList = append(pendingMediaList, pendingMedia{
+				mediaID:   mediaID,
+				mediaType: mediaType,
+				attType:   att.Type,
 			})
-
-			a.logger.Info("[MSG_ROUTE] attaching image to message",
-				slog.String("filename", att.Name),
-				slog.Int("size_bytes", len(att.Data)),
-				slog.String("md5", md5Str))
+			a.logger.Info("[SEND] attachment uploaded",
+				slog.String("name", att.Name),
+				slog.String("media_id", mediaID))
 		}
 	}
 
@@ -627,7 +641,19 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 			ChatType: chatTypeInt,
 		}
 
-		return wsClient.SendReply(ctx, reqID, body, cmd)
+		if err := wsClient.SendReply(ctx, reqID, body, cmd); err != nil {
+			return err
+		}
+
+		// Send pending media messages
+		for _, pm := range pendingMediaList {
+			if err := a.sendMediaMessage(ctx, wsClient, chatID, chatTypeInt, pm.mediaID, pm.attType); err != nil {
+				a.logger.Error("[SEND] failed to send media message (proactive)",
+					slog.String("media_id", pm.mediaID),
+					slog.Any("error", err))
+			}
+		}
+		return nil
 	}
 
 	// Use StreamMsgBody for respond (CmdRespondMsg)
@@ -637,11 +663,81 @@ func (a *Adapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg chann
 			ID:      generateStreamID(),
 			Finish:  true,
 			Content: content,
-			MsgItem: msgItems,
 		},
 	}
 
-	return wsClient.SendReply(ctx, reqID, body, cmd)
+	if err := wsClient.SendReply(ctx, reqID, body, cmd); err != nil {
+		return err
+	}
+
+	// Send pending media messages as proactive sends (CmdSendMsg)
+	if len(pendingMediaList) > 0 {
+		chatID, chatTypeInt := parseSendTarget(msg.Target)
+		for _, pm := range pendingMediaList {
+			if err := a.sendMediaMessage(ctx, wsClient, chatID, chatTypeInt, pm.mediaID, pm.attType); err != nil {
+				a.logger.Error("[SEND] failed to send media message",
+					slog.String("media_id", pm.mediaID),
+					slog.Any("error", err))
+				// Continue sending remaining media
+			}
+		}
+	}
+	return nil
+}
+
+// attachmentTypeToMediaType maps a channel.AttachmentType to a WeCom media type string.
+func attachmentTypeToMediaType(t channel.AttachmentType) string {
+	switch t {
+	case channel.AttachmentImage, channel.AttachmentGIF:
+		return MediaTypeImage
+	case channel.AttachmentAudio, channel.AttachmentVoice:
+		return MediaTypeVoice
+	case channel.AttachmentVideo:
+		return MediaTypeVideo
+	default:
+		return MediaTypeFile
+	}
+}
+
+// parseSendTarget parses a target string into a chatID and chat_type integer.
+// It handles user_id:xxx, chat_id:xxx, and bare ID formats.
+func parseSendTarget(target string) (chatID string, chatType int) {
+	target = strings.TrimSpace(target)
+	if strings.HasPrefix(target, "user_id:") {
+		return strings.TrimPrefix(target, "user_id:"), ChatTypeSingle
+	}
+	if strings.HasPrefix(target, "chat_id:") {
+		return strings.TrimPrefix(target, "chat_id:"), ChatTypeGroup
+	}
+	return target, ChatTypeAuto
+}
+
+// sendMediaMessage sends a single media message using CmdSendMsg.
+func (a *Adapter) sendMediaMessage(ctx context.Context, wsClient *WebSocketClient, chatID string, chatType int, mediaID string, attType channel.AttachmentType) error {
+	mediaType := attachmentTypeToMediaType(attType)
+	ref := &MediaIDRef{MediaID: mediaID}
+	body := SendMediaMsgBody{
+		MsgType:  mediaType,
+		ChatID:   chatID,
+		ChatType: chatType,
+	}
+	switch mediaType {
+	case MediaTypeImage:
+		body.Image = ref
+	case MediaTypeVoice:
+		body.Voice = ref
+	case MediaTypeVideo:
+		body.Video = ref
+	default:
+		body.File = ref
+	}
+	reqID := generateReqID(CmdSendMsg)
+	a.logger.Info("[SEND] sending media message",
+		slog.String("media_id", mediaID),
+		slog.String("media_type", mediaType),
+		slog.String("chat_id", chatID),
+		slog.Int("chat_type", chatType))
+	return wsClient.SendReply(ctx, reqID, body, CmdSendMsg)
 }
 
 // processQuoteContent processes quote content and returns text and attachments

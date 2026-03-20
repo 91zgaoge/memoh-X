@@ -34,9 +34,9 @@ interface LoopDetectResult {
 }
 
 const WINDOW_SIZE = 40           // sliding window of recent calls
-const REPEAT_NO_PROGRESS = 8    // same tool+params+result → stuck
-const PING_PONG_PAIRS   = 5     // A→B→A→B... pairs with no change → stuck
-const GLOBAL_BREAKER    = 25    // identical (tool+params) calls in window
+const REPEAT_NO_PROGRESS = 3    // same tool+params+result → stuck
+const PING_PONG_PAIRS   = 2     // A→B→A→B... pairs with no change → stuck
+const GLOBAL_BREAKER    = 10    // identical (tool+params) calls in window
 
 // ---------------------------------------------------------------------------
 // Per-session state

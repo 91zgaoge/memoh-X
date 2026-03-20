@@ -406,7 +406,7 @@ func (p *Executor) resolveAttachmentRef(ctx context.Context, botID, ref, name st
 	// Container file path.
 	if p.fileReader != nil && strings.HasPrefix(ref, "/") {
 		cleanPath := filepath.Clean(ref)
-		if !strings.HasPrefix(cleanPath, "/data/") {
+		if !strings.HasPrefix(cleanPath, "/data/") && !strings.HasPrefix(cleanPath, "/shared/") {
 			return channel.Attachment{Type: channel.AttachmentFile, Name: name}
 		}
 		data, err := p.fileReader.ReadFileBytes(ctx, botID, cleanPath)

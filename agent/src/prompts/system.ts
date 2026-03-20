@@ -120,10 +120,13 @@ export const system = ({
   if (!isMicro) {
     sections.push(
       '## File Output Rule\n\n' +
-      '**MANDATORY**: ALL generated files (PDF, DOCX, XLSX, PPTX, HTML, images, CSV, etc.) ' +
-      'MUST be saved under `/shared/`. NEVER save generated files to `/data/` — ' +
-      'files in `/data/` are NOT accessible to the user. ' +
-      'Example: `/shared/report.pdf`, `/shared/output/analysis.xlsx`.'
+      '**MANDATORY**: To deliver a file to the user, you MUST follow BOTH steps in order:\n\n' +
+      '**Step 1 — Write the file**: Call the `write` tool with `path=/shared/<filename>` and the full file content.\n' +
+      '**Step 2 — Reference the file**: Output `<attachments>\\n- /shared/<filename>\\n</attachments>` in your reply.\n\n' +
+      '**WARNING**: If you output an `<attachments>` block WITHOUT first calling `write`, the system will ' +
+      'try to read a file that does not exist and the delivery will SILENTLY FAIL — the user will NOT receive the file. ' +
+      'Do NOT fake file delivery. You MUST call `write` first.\n\n' +
+      'Files saved to `/data/` are NOT accessible to the user — always use `/shared/`.'
     )
   }
 
@@ -142,25 +145,25 @@ export const system = ({
       '### Receive\n\n' +
       'Files user uploaded will added to your workspace, the file path will be included in the message header.\n\n' +
       '**CRITICAL - Binary File Handling:**\n' +
-      '- Excel files (.xls, .xlsx, .xlsm): Use the `xlsx` skill immediately. DO NOT use the read tool - these are binary files that cannot be read as text.\n' +
+      '- Excel files (.xls, .xlsx, .xlsm): Call `exec` immediately with Python openpyxl to read them. NEVER use the `read` tool.\n' +
       '- PDF files: Use an appropriate PDF skill if available, or ask the user what they want to know.\n' +
       '- Word documents (.docx): Use the `docx` skill if available.\n' +
       '- Images: Analyze directly if the model supports vision, or describe what you see.\n\n' +
       '### Send\n\n' +
-      '**For using channel tools**: Add file path to the message header.\n\n' +
-      '**For directly request**: Use the following format:\n\n' +
+      '**File Delivery Workflow** (when user asks to send/deliver a file):\n\n' +
+      '1. **Create the file** — call `write` with path `/shared/<filename>` and the file content\n' +
+      '2. **Deliver the file** — include an `<attachments>` block in your response:\n\n' +
       block([
         '<attachments>',
-        '- /path/to/file.pdf',
-        '- /path/to/video.mp4',
-        'https://example.com/image.png',
+        '- /shared/filename.txt',
         '</attachments>',
       ].join('\n')) + '\n\n' +
-      'External URLs are also supported.\n\n' +
+      'The system will automatically read the file from `/shared/` and send it to the user. External HTTP/HTTPS URLs are also supported.\n\n' +
       'Important rules for attachments blocks:\n' +
       `- Only include file paths or URLs (one per line, prefixed by ${quote('- ')})\n` +
       `- Do not include any extra text inside ${quote('<attachments>...</attachments>')}\n` +
-      '- You may output the attachments block anywhere in your response; it will be parsed and removed from visible text.'
+      '- You may output the attachments block anywhere in your response; it will be parsed and removed from visible text.\n\n' +
+      '**CRITICAL**: NEVER say you cannot create or send files. You HAVE the `write` tool. Always use `write` + `<attachments>` to deliver files when asked.'
     )
   }
 
@@ -181,18 +184,19 @@ export const system = ({
       `## Skills\n\n` +
       `There are ${skills.length} skills available, you can use ${quote('use_skill')} to use a skill.\n` +
       skillList +
-      '\n\n**When to use skills (CRITICAL - FOLLOW THESE RULES):**\n' +
-      '**Excel/Spreadsheet files (.xls, .xlsx, .xlsm) - READ CAREFULLY:**\n' +
-      '- MANDATORY: Your FIRST action MUST be to use the **xlsx** skill via use_skill tool.\n' +
-      '- NEVER use rag-documents for Excel files - it requires external RAG service that may not be available.\n' +
-      '- NEVER use read tool on Excel files - they are binary formats that cannot be read as text.\n' +
-      '- If you see an Excel file attachment, STOP and use xlsx skill FIRST before doing anything else.\n\n' +
+      '\n\n**Handling binary file attachments (CRITICAL):**\n\n' +
+      '**Excel/Spreadsheet files (.xls, .xlsx, .xlsm):**\n' +
+      '- NEVER use the `read` tool — binary format, will produce garbage.\n' +
+      '- IMMEDIATELY call `exec` with this Python script (replace the path with the actual file path):\n' +
+      '```\n' +
+      'python3 -c "\nimport openpyxl\nwb = openpyxl.load_workbook(\'/path/to/file.xlsx\', read_only=True, data_only=True)\nfor name in wb.sheetnames:\n    ws = wb[name]\n    print(f\'## Sheet: {name}\')\n    for row in ws.iter_rows(values_only=True):\n        if any(v is not None for v in row):\n            print(\'\\\\t\'.join(str(v) if v is not None else \'\' for v in row))\n"\n' +
+      '```\n' +
+      'After reading, process the data and respond to the user.\n\n' +
       '**PDF files:**\n' +
-      '- Use **pdf** skill with use_skill tool if available.\n' +
-      '- Only use rag-documents if pdf skill is not available AND RAG service is confirmed running.\n\n' +
+      '- Use **pdf** skill with use_skill tool if available.\n\n' +
       '**Word documents (.docx):**\n' +
       '- Use **docx** skill with use_skill tool if available.\n\n' +
-      '**General rule:** When you receive ANY file attachment that you cannot directly read as plain text, use the appropriate skill immediately rather than attempting direct file reads.'
+      '**General rule:** For plain-text files use the `read` tool. For binary files, use `exec` with appropriate Python code.'
     )
   }
 

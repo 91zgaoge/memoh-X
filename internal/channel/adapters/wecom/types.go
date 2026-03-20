@@ -28,6 +28,11 @@ const (
 	CmdMsgCallback   = "aibot_msg_callback"
 	CmdEventCallback = "aibot_event_callback"
 	CmdPong          = "pong"
+
+	// 媒体上传命令
+	CmdUploadMediaInit   = "aibot_upload_media_init"
+	CmdUploadMediaChunk  = "aibot_upload_media_chunk"
+	CmdUploadMediaFinish = "aibot_upload_media_finish"
 )
 
 // 消息类型常量
@@ -40,6 +45,12 @@ const (
 	MsgTypeMixed    = "mixed"
 	MsgTypeEvent    = "event"
 	MsgTypeStream   = "stream"
+
+	// 媒体文件类型常量（用于上传）
+	MediaTypeFile  = "file"
+	MediaTypeImage = "image"
+	MediaTypeVoice = "voice"
+	MediaTypeVideo = "video"
 )
 
 // 事件类型常量
@@ -312,6 +323,63 @@ type SendTemplateCardMsgBody struct {
 	// 1：单聊（用户 userid）；2：群聊；0 或不填：兼容单聊/群聊类型，优先按照群聊会话类型去发送消息
 	// 建议开发者设置具体的单聊或者群聊来使用
 	ChatType int `json:"chat_type,omitempty"`
+}
+
+// ========== 媒体上传消息体 ==========
+
+// UploadMediaInitBody 媒体上传初始化请求体
+type UploadMediaInitBody struct {
+	Filename    string `json:"filename"`
+	FileSize    int    `json:"total_size"`
+	MediaType   string `json:"type"`          // file/image/voice/video
+	ChunkNum    int    `json:"total_chunks"`
+	MD5         string `json:"md5,omitempty"`
+}
+
+// UploadMediaInitResult 媒体上传初始化响应体
+type UploadMediaInitResult struct {
+	ErrCode   int    `json:"errcode"`
+	ErrMsg    string `json:"errmsg,omitempty"`
+	UploadID  string `json:"upload_id"`
+	ChunkSize int    `json:"chunk_size,omitempty"` // 服务器指定的分片大小
+}
+
+// UploadMediaChunkBody 媒体分片上传请求体
+type UploadMediaChunkBody struct {
+	UploadID   string `json:"upload_id"`
+	ChunkIndex int    `json:"chunk_index"` // 0-based (官方文档确认从0开始)
+	ChunkData  string `json:"base64_data"` // base64-encoded
+}
+
+// UploadMediaFinishBody 媒体上传完成请求体
+type UploadMediaFinishBody struct {
+	UploadID string `json:"upload_id"`
+	MD5      string `json:"md5,omitempty"` // 完整文件 MD5
+}
+
+// UploadMediaFinishResult 媒体上传完成响应体
+type UploadMediaFinishResult struct {
+	ErrCode   int    `json:"errcode"`
+	ErrMsg    string `json:"errmsg,omitempty"`
+	MediaID   string `json:"media_id"`
+	MediaType string `json:"type,omitempty"`      // 媒体类型
+	CreatedAt int64  `json:"created_at,omitempty"` // 创建时间（Unix 时间戳）
+}
+
+// MediaIDRef 媒体 ID 引用
+type MediaIDRef struct {
+	MediaID string `json:"media_id"`
+}
+
+// SendMediaMsgBody 发送媒体消息体（使用 media_id）
+type SendMediaMsgBody struct {
+	MsgType  string      `json:"msgtype"` // "image"/"file"/"voice"/"video"
+	Image    *MediaIDRef `json:"image,omitempty"`
+	File     *MediaIDRef `json:"file,omitempty"`
+	Voice    *MediaIDRef `json:"voice,omitempty"`
+	Video    *MediaIDRef `json:"video,omitempty"`
+	ChatID   string      `json:"chatid,omitempty"`
+	ChatType int         `json:"chat_type,omitempty"`
 }
 
 // ========== 辅助结构 ==========

@@ -1798,7 +1798,11 @@ func (r *Resolver) streamChat(ctx context.Context, payload gatewayRequest, req c
 			continue
 		}
 		receivedChunks++
-		chunkCh <- conversation.StreamChunk([]byte(data))
+		select {
+		case chunkCh <- conversation.StreamChunk([]byte(data)):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 
 		// Accumulate text_delta content for partial-save fallback.
 		accumulateTextDelta(&textAccum, data)

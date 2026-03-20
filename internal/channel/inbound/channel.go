@@ -400,9 +400,10 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 	})
 
 	var (
-		finalMessages  []conversation.ModelMessage
-		streamErr      error
-		collectedUsage *gatewayUsage
+		finalMessages   []conversation.ModelMessage
+		streamErr       error
+		collectedUsage  *gatewayUsage
+		sharedFilePaths []string
 	)
 	for chunkCh != nil || streamErrCh != nil {
 		select {
@@ -427,6 +428,14 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 			// Collect the latest usage data (prefer agent_end/done events)
 			if usage != nil && usage.TotalTokens > 0 {
 				collectedUsage = usage
+			}
+			// Collect file paths from attachment_delta events
+			oldLen := len(sharedFilePaths)
+			sharedFilePaths = appendAttachmentDeltaPaths(sharedFilePaths, chunk)
+			if p.logger != nil && len(sharedFilePaths) > oldLen {
+				p.logger.Info("appendAttachmentDeltaPaths: collected new paths",
+					slog.Int("total_paths", len(sharedFilePaths)),
+					slog.Any("new_paths", sharedFilePaths[oldLen:]))
 			}
 			for _, event := range events {
 				if pushErr := stream.Push(ctx, event); pushErr != nil {
@@ -525,6 +534,18 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 			return err
 		}
 	}
+	// Send any files the bot wrote to /shared/ during this response
+	if len(sharedFilePaths) > 0 {
+		if p.logger != nil {
+			p.logger.Info("sendSharedFileAttachments: sending files",
+				slog.Int("count", len(sharedFilePaths)),
+				slog.Any("paths", sharedFilePaths))
+		}
+		sendSharedFileAttachments(ctx, sharedFilePaths, p.dataRoot, stream, p.logger)
+	} else if p.logger != nil {
+		p.logger.Info("sendSharedFileAttachments: no files to send", slog.Int("sharedFilePaths_len", len(sharedFilePaths)))
+	}
+
 	if err := stream.Push(ctx, channel.StreamEvent{
 		Type:   channel.StreamEventStatus,
 		Status: channel.StreamStatusCompleted,
@@ -1448,6 +1469,124 @@ func (p *ChannelInboundProcessor) dispatchGroupChat(
 	_ = outputs
 	_ = collectedUsage
 	return nil
+}
+
+// appendAttachmentDeltaPaths parses an attachment_delta SSE chunk and appends
+// any new /shared/ file paths to the given slice, deduplicating by path.
+func appendAttachmentDeltaPaths(paths []string, chunk []byte) []string {
+	var env struct {
+		Type        string `json:"type"`
+		Attachments []struct {
+			Type string `json:"type"`
+			Path string `json:"path"`
+		} `json:"attachments"`
+	}
+	if json.Unmarshal(chunk, &env) != nil || env.Type != "attachment_delta" {
+		return paths
+	}
+	for _, a := range env.Attachments {
+		p := strings.TrimSpace(a.Path)
+		if p == "" {
+			continue
+		}
+		dup := false
+		for _, existing := range paths {
+			if existing == p {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// sendSharedFileAttachments reads files from the host filesystem (at dataRoot+path)
+// and pushes a StreamEventFinal for each file so it gets delivered to the user.
+func sendSharedFileAttachments(ctx context.Context, paths []string, dataRoot string, stream channel.OutboundStream, logger *slog.Logger) {
+	if dataRoot == "" {
+		dataRoot = "/opt/memoh/data"
+	}
+	for _, containerPath := range paths {
+		clean := filepath.Clean(containerPath)
+		// Map container path to host path: /shared/foo → {dataRoot}/shared/foo
+		rel := strings.TrimPrefix(clean, "/")
+		hostPath := filepath.Join(dataRoot, rel)
+		data, err := os.ReadFile(hostPath)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("sendSharedFileAttachments: cannot read file",
+					slog.String("container_path", containerPath),
+					slog.String("host_path", hostPath),
+					slog.Any("error", err))
+			}
+			continue
+		}
+		name := filepath.Base(clean)
+		att := channel.Attachment{
+			Type: inferAttachmentTypeFromName(name),
+			Name: name,
+			Data: data,
+			Size: int64(len(data)),
+			Mime: inferMimeFromName(name),
+		}
+		if logger != nil {
+			logger.Info("sendSharedFileAttachments: sending file",
+				slog.String("name", name),
+				slog.Int("size", len(data)))
+		}
+		if pushErr := stream.Push(ctx, channel.StreamEvent{
+			Type: channel.StreamEventFinal,
+			Final: &channel.StreamFinalizePayload{
+				Message: channel.Message{Attachments: []channel.Attachment{att}},
+			},
+		}); pushErr != nil {
+			if logger != nil {
+				logger.Warn("sendSharedFileAttachments: push failed",
+					slog.String("name", name),
+					slog.Any("error", pushErr))
+			}
+		}
+	}
+}
+
+// inferAttachmentTypeFromName returns an AttachmentType based on the file extension.
+func inferAttachmentTypeFromName(name string) channel.AttachmentType {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg":
+		return channel.AttachmentImage
+	case ".mp4", ".mov", ".avi", ".mkv", ".webm":
+		return channel.AttachmentVideo
+	case ".mp3", ".aac", ".flac", ".ogg", ".m4a":
+		return channel.AttachmentAudio
+	case ".amr", ".wav":
+		return channel.AttachmentVoice
+	default:
+		return channel.AttachmentFile
+	}
+}
+
+// inferMimeFromName returns a MIME type based on the file extension.
+func inferMimeFromName(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	mimes := map[string]string{
+		".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+		".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+		".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+		".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav",
+		".pdf": "application/pdf", ".zip": "application/zip",
+		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+	}
+	if m, ok := mimes[ext]; ok {
+		return m
+	}
+	return "application/octet-stream"
 }
 
 // buildInputAttachments converts channel attachments with binary data into
