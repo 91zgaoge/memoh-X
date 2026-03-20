@@ -127,6 +127,28 @@ WHERE m.bot_id = sqlc.arg(bot_id)
 ORDER BY m.created_at DESC
 LIMIT sqlc.arg(max_count);
 
+-- name: ListMessagesLatestByRoute :many
+SELECT
+  m.id,
+  m.bot_id,
+  m.route_id,
+  m.sender_channel_identity_id,
+  m.sender_account_user_id AS sender_user_id,
+  m.channel_type AS platform,
+  m.source_message_id AS external_message_id,
+  m.source_reply_to_message_id,
+  m.role,
+  m.content,
+  m.metadata,
+  m.created_at,
+  ci.display_name AS sender_display_name,
+  ci.avatar_url AS sender_avatar_url
+FROM bot_history_messages m
+LEFT JOIN channel_identities ci ON ci.id = m.sender_channel_identity_id
+WHERE m.route_id = sqlc.arg(route_id)
+ORDER BY m.created_at DESC
+LIMIT sqlc.arg(max_count);
+
 -- name: DeleteMessagesByBot :exec
 DELETE FROM bot_history_messages
 WHERE bot_id = sqlc.arg(bot_id);

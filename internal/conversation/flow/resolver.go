@@ -557,7 +557,7 @@ func (r *Resolver) resolve(ctx context.Context, req conversation.ChatRequest) (r
 	if !skipHistory && r.conversationSvc != nil {
 		// Optimized: loadMessages now directly limits messages by historyLimit
 		// This eliminates the need for a separate limitHistoryTurns call
-		msgs, err := r.loadMessages(ctx, req.ChatID, historyLimit)
+		msgs, err := r.loadMessages(ctx, req.ChatID, req.RouteID, historyLimit)
 		if err != nil {
 			r.logProcessStep(ctx, req.BotID, req.ChatID, traceID, req.UserID, req.CurrentChannel,
 				processlog.StepHistoryLoaded, processlog.LevelError, "Message load failed",
@@ -1077,12 +1077,10 @@ func (r *Resolver) executeTrigger(ctx context.Context, p triggerParams, token st
 	if isHeartbeat {
 		taskType = "heartbeat"
 	}
-	// Heartbeat tasks must NOT load user conversation history - they are
-	// stateless background jobs and should run independently.
-	maxCtxLoadTime := 0
-	if isHeartbeat {
-		maxCtxLoadTime = -1
-	}
+	// Background tasks (schedule/heartbeat) must NOT load user conversation history -
+	// they are stateless background jobs and should run independently without
+	// polluting or accessing user conversation context.
+	maxCtxLoadTime := -1
 	req := conversation.ChatRequest{
 		BotID:                p.botID,
 		ChatID:               p.botID,
@@ -2198,7 +2196,7 @@ func (r *Resolver) resolveContainerID(ctx context.Context, botID, explicit strin
 
 // --- message loading ---
 
-func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit int) ([]conversation.ModelMessage, error) {
+func (r *Resolver) loadMessages(ctx context.Context, chatID string, routeID string, historyLimit int) ([]conversation.ModelMessage, error) {
 	if r.messageService == nil {
 		return nil, nil
 	}
@@ -2213,7 +2211,25 @@ func (r *Resolver) loadMessages(ctx context.Context, chatID string, historyLimit
 		maxMsgs = 20 // Minimum to ensure some context
 	}
 
-	msgs, err := r.messageService.ListLatest(ctx, chatID, maxMsgs)
+	var msgs []messagepkg.Message
+	var err error
+	if strings.TrimSpace(routeID) != "" {
+		// Per-route isolation: load only messages for this specific user/group route
+		r.logger.Info("loadMessages: using per-route isolation",
+			slog.String("route_id", routeID),
+			slog.Int64("max_msgs", int64(maxMsgs)))
+		msgs, err = r.messageService.ListLatestByRoute(ctx, routeID, maxMsgs)
+		if err == nil {
+			r.logger.Info("loadMessages: loaded messages by route",
+				slog.String("route_id", routeID),
+				slog.Int("msg_count", len(msgs)))
+		}
+	} else {
+		r.logger.Warn("loadMessages: no route_id, falling back to chatID (bot-level)",
+			slog.String("chat_id", chatID),
+			slog.Int64("max_msgs", int64(maxMsgs)))
+		msgs, err = r.messageService.ListLatest(ctx, chatID, maxMsgs)
+	}
 	if err != nil {
 		return nil, err
 	}

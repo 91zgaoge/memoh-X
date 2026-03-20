@@ -362,6 +362,69 @@ func (q *Queries) ListMessagesLatest(ctx context.Context, arg ListMessagesLatest
 	return items, nil
 }
 
+const listMessagesLatestByRoute = `-- name: ListMessagesLatestByRoute :many
+SELECT
+  m.id,
+  m.bot_id,
+  m.route_id,
+  m.sender_channel_identity_id,
+  m.sender_account_user_id AS sender_user_id,
+  m.channel_type AS platform,
+  m.source_message_id AS external_message_id,
+  m.source_reply_to_message_id,
+  m.role,
+  m.content,
+  m.metadata,
+  m.created_at,
+  ci.display_name AS sender_display_name,
+  ci.avatar_url AS sender_avatar_url
+FROM bot_history_messages m
+LEFT JOIN channel_identities ci ON ci.id = m.sender_channel_identity_id
+WHERE m.route_id = $1
+ORDER BY m.created_at DESC
+LIMIT $2
+`
+
+type ListMessagesLatestByRouteParams struct {
+	RouteID  pgtype.UUID `json:"route_id"`
+	MaxCount int32       `json:"max_count"`
+}
+
+func (q *Queries) ListMessagesLatestByRoute(ctx context.Context, arg ListMessagesLatestByRouteParams) ([]ListMessagesLatestRow, error) {
+	rows, err := q.db.Query(ctx, listMessagesLatestByRoute, arg.RouteID, arg.MaxCount)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMessagesLatestRow
+	for rows.Next() {
+		var i ListMessagesLatestRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BotID,
+			&i.RouteID,
+			&i.SenderChannelIdentityID,
+			&i.SenderUserID,
+			&i.Platform,
+			&i.ExternalMessageID,
+			&i.SourceReplyToMessageID,
+			&i.Role,
+			&i.Content,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.SenderDisplayName,
+			&i.SenderAvatarUrl,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMessagesSince = `-- name: ListMessagesSince :many
 SELECT
   m.id,

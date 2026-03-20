@@ -144,6 +144,22 @@ func (s *DBService) ListLatest(ctx context.Context, botID string, limit int32) (
 	return toMessagesFromLatest(rows), nil
 }
 
+// ListLatestByRoute returns the latest N messages for a specific route (user/group), newest first.
+func (s *DBService) ListLatestByRoute(ctx context.Context, routeID string, limit int32) ([]Message, error) {
+	pgRouteID, err := dbpkg.ParseUUID(routeID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queries.ListMessagesLatestByRoute(ctx, sqlc.ListMessagesLatestByRouteParams{
+		RouteID:  pgRouteID,
+		MaxCount: limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return toMessagesFromLatest(rows), nil
+}
+
 // ListBefore returns up to limit messages older than before (created_at < before), ordered oldest-first.
 func (s *DBService) ListBefore(ctx context.Context, botID string, before time.Time, limit int32) ([]Message, error) {
 	pgBotID, err := dbpkg.ParseUUID(botID)
