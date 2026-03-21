@@ -730,7 +730,8 @@ func (s *OutboundStream) sendFullContent(ctx context.Context, content string, fi
 				slog.Duration("total_elapsed", totalElapsed),
 				slog.Int("send_count", s.sendCount))
 			// Send any pending media messages (uploaded attachments)
-			s.sendPendingMedia(ctx)
+			// Use sendPendingMediaWithMention to @mention the user in group chats
+			s.sendPendingMediaWithMention(ctx, "已为您生成文件")
 		} else {
 			// [PERF] 记录中间消息发送统计
 			s.mu.Lock()
