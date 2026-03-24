@@ -126,6 +126,153 @@
       </div>
     </div>
 
+    <!-- WeChat Personal (weixin): Bridge + QR code -->
+    <div
+      v-else-if="channelItem.meta.type === 'weixin'"
+      class="space-y-4"
+    >
+      <h4 class="text-sm font-medium">
+        {{ $t('bots.channels.weixinConfig') }}
+      </h4>
+
+      <!-- API Key -->
+      <div class="space-y-2">
+        <Label>{{ $t('bots.channels.apiKey') }}</Label>
+        <div class="flex items-center gap-2">
+          <code class="flex-1 rounded-md border border-border bg-muted/50 px-3 py-2 font-mono text-sm break-all select-all">
+            {{ weixinApiKeyVisible ? (weixinApiKey || '...') : '••••••••••••••••' }}
+          </code>
+          <Button
+            variant="outline"
+            size="sm"
+            @click="weixinApiKeyVisible = !weixinApiKeyVisible"
+          >
+            <FontAwesomeIcon
+              :icon="['fas', weixinApiKeyVisible ? 'eye-slash' : 'eye']"
+              class="size-3.5"
+            />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="!weixinApiKey"
+            @click="copyToClipboard(weixinApiKey || '', $t('bots.channels.apiKeyCopied'))"
+          >
+            <FontAwesomeIcon
+              :icon="['fas', 'copy']"
+              class="size-3.5"
+            />
+          </Button>
+        </div>
+      </div>
+
+      <!-- Bridge status -->
+      <div class="flex items-center justify-between rounded-md border border-border px-3 py-2">
+        <div class="flex items-center gap-2 text-sm">
+          <span class="text-muted-foreground">{{ $t('bots.channels.weixinBridgeStatus') }}</span>
+          <span
+            class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
+            :class="weixinBridgeStatusClass"
+          >
+            {{ weixinBridgeStatusLabel }}
+          </span>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          :disabled="isRefreshingStatus"
+          @click="refreshWeixinStatus"
+        >
+          <FontAwesomeIcon
+            :icon="['fas', 'rotate']"
+            class="size-3.5"
+            :class="{ 'animate-spin': isRefreshingStatus }"
+          />
+        </Button>
+      </div>
+
+      <!-- Start Bridge button (shown only when bridge is stopped) -->
+      <div
+        v-if="weixinBridgeStatus === 'stopped'"
+        class="space-y-1"
+      >
+        <Button
+          class="w-full"
+          :disabled="!weixinApiKey || isStartingBridge"
+          @click="startWeixinBridge"
+        >
+          <FontAwesomeIcon
+            :icon="['fas', 'play']"
+            class="mr-2 size-3.5"
+          />
+          {{ isStartingBridge ? $t('bots.channels.weixinBridgeStarting') : $t('bots.channels.weixinStartBridge') }}
+        </Button>
+      </div>
+
+      <!-- Stop Bridge button (shown when bridge is not stopped - including unknown, running, etc.) -->
+      <div
+        v-else
+        class="space-y-1"
+      >
+        <Button
+          variant="destructive"
+          class="w-full"
+          :disabled="isStoppingBridge"
+          @click="stopWeixinBridge"
+        >
+          <FontAwesomeIcon
+            :icon="['fas', 'stop']"
+            class="mr-2 size-3.5"
+          />
+          {{ isStoppingBridge ? $t('bots.channels.weixinBridgeStopping') : $t('bots.channels.weixinStopBridge') }}
+        </Button>
+      </div>
+
+      <!-- Scan QR code button -->
+      <div class="space-y-1">
+        <Button
+          class="w-full"
+          :disabled="!weixinApiKey || weixinBridgeStatus === 'unknown' || weixinBridgeStatus === 'stopped'"
+          @click="openWeixinQRCode"
+        >
+          <FontAwesomeIcon
+            :icon="['fas', 'qrcode']"
+            class="mr-2 size-3.5"
+          />
+          {{ $t('bots.channels.weixinScanQRCode') }}
+        </Button>
+        <p class="text-xs text-muted-foreground text-center">
+          {{ $t('bots.channels.weixinScanQRCodeDesc') }}
+        </p>
+      </div>
+
+      <!-- Setup instructions -->
+      <div class="rounded-md bg-muted p-3 text-sm space-y-2">
+        <p class="font-medium">
+          {{ $t('bots.channels.weixinQuickStart') }}
+        </p>
+        <ol class="list-decimal list-inside space-y-1 text-muted-foreground">
+          <li>{{ $t('bots.channels.weixinStep1') }}</li>
+          <li>{{ $t('bots.channels.weixinStep2') }}</li>
+          <li>{{ $t('bots.channels.weixinStep3') }}</li>
+        </ol>
+      </div>
+
+      <!-- Generate API Key if not exists -->
+      <div
+        v-if="!weixinApiKey"
+        class="flex justify-end"
+      >
+        <Button
+          :disabled="isGeneratingKey"
+          @click="generateWeixinApiKey"
+        >
+          <Spinner v-if="isGeneratingKey" />
+          {{ $t('bots.channels.generateApiKey') }}
+        </Button>
+      </div>
+    </div>
+
     <!-- Credentials form (dynamic from config_schema) -->
     <div
       v-else
@@ -225,7 +372,7 @@
 
     <!-- Status (not for WeChat) -->
     <div
-      v-if="channelItem.meta.type !== 'wechat'"
+      v-if="channelItem.meta.type !== 'wechat' && channelItem.meta.type !== 'weixin'"
       class="flex items-center justify-between"
     >
       <Label>{{ $t('common.status') }}</Label>
@@ -237,7 +384,7 @@
 
     <!-- Save (not for WeChat) -->
     <div
-      v-if="channelItem.meta.type !== 'wechat'"
+      v-if="channelItem.meta.type !== 'wechat' && channelItem.meta.type !== 'weixin'"
       class="flex justify-end"
     >
       <Button
@@ -389,6 +536,238 @@ function copyWeChatConfig() {
   }
   copyToClipboard(JSON.stringify(config, null, 2), t('bots.channels.configCopied'))
 }
+
+// ---- WeChat Personal (weixin) specific ----
+
+const weixinApiKeyVisible = ref(false)
+const weixinApiKey = computed<string | null>(() => {
+  if (props.channelItem.meta.type !== 'weixin') return null
+  const creds = props.channelItem.config?.credentials
+  return creds?.api_key as string ?? null
+})
+
+const weixinBridgeUrl = computed(() => `/api/weixin-bridge/${botIdRef.value}`)
+const weixinBridgeStatus = ref<string>('unknown')
+const isRefreshingStatus = ref(false)
+const isStartingBridge = ref(false)
+const isStoppingBridge = ref(false)
+
+const weixinBridgeStatusLabel = computed(() => {
+  const map: Record<string, string> = {
+    connected: t('bots.channels.weixinBridgeStatusConnected'),
+    connecting: t('bots.channels.weixinBridgeStatusConnecting'),
+    disconnected: t('bots.channels.weixinBridgeStatusDisconnected'),
+    pending: t('bots.channels.weixinBridgeStatusPending'),
+  }
+  return map[weixinBridgeStatus.value] ?? t('bots.channels.weixinBridgeStatusUnknown')
+})
+
+const weixinBridgeStatusClass = computed(() => {
+  switch (weixinBridgeStatus.value) {
+    case 'connected':
+      return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+    case 'connecting':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+    case 'disconnected':
+      return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
+    default:
+      return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+  }
+})
+
+async function refreshWeixinStatus() {
+  isRefreshingStatus.value = true
+  try {
+    const token = localStorage.getItem('token') || ''
+    const resp = await fetch(`${weixinBridgeUrl.value}/info`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (resp.ok) {
+      const data = await resp.json()
+      // info endpoint returns { success: true, info: { status: 'running' | 'stopped' | ... } }
+      weixinBridgeStatus.value = data.info?.status ?? 'unknown'
+    } else if (resp.status === 404) {
+      // Bridge not found means it's not running
+      weixinBridgeStatus.value = 'stopped'
+    } else {
+      weixinBridgeStatus.value = 'unknown'
+    }
+  } catch {
+    weixinBridgeStatus.value = 'unknown'
+  } finally {
+    isRefreshingStatus.value = false
+  }
+}
+
+function openWeixinQRCode() {
+  window.open(`${weixinBridgeUrl.value}/qrcode`, '_blank')
+}
+
+async function generateWeixinApiKey() {
+  isGeneratingKey.value = true
+  try {
+    const token = localStorage.getItem('token') || ''
+    const response = await fetch(`/api/bots/${botIdRef.value}/preauth_keys`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ ttl_seconds: 365 * 24 * 60 * 60 }),
+    })
+
+    if (!response.ok) throw new Error('Failed to generate API key')
+
+    const data = await response.json()
+    const apiKey = data.token || data.Token
+    if (!apiKey) throw new Error('API key not found in response')
+
+    await upsertChannel({
+      platform: 'weixin',
+      data: {
+        credentials: { api_key: apiKey },
+        status: 'active',
+      },
+    })
+
+    toast.success(t('bots.channels.apiKeyGenerated'))
+    emit('saved')
+  } catch {
+    toast.error(t('bots.channels.apiKeyGenerateFailed'))
+  } finally {
+    isGeneratingKey.value = false
+  }
+}
+
+// Stop weixin-bridge container for this bot
+async function stopWeixinBridge() {
+  isStoppingBridge.value = true
+  try {
+    const token = localStorage.getItem('token') || ''
+    const response = await fetch(`/api/weixin-bridge/${botIdRef.value}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+      // Even if not found in backend memory, we treat it as success
+      // since the container might already be gone
+      if (response.status === 404) {
+        weixinBridgeStatus.value = 'stopped'
+        toast.success(t('bots.channels.weixinBridgeStopped'))
+        return
+      }
+      throw new Error(data.error || data.message || 'Failed to stop bridge')
+    }
+
+    weixinBridgeStatus.value = 'stopped'
+    toast.success(t('bots.channels.weixinBridgeStopped'))
+  } catch (err: any) {
+    toast.error(err?.message || t('bots.channels.weixinBridgeStopFailed'))
+  } finally {
+    isStoppingBridge.value = false
+  }
+}
+
+// Start weixin-bridge container for this bot
+async function startWeixinBridge() {
+  if (!weixinApiKey.value) {
+    toast.error(t('bots.channels.weixinApiKeyRequired'))
+    return
+  }
+
+  isStartingBridge.value = true
+  let pollInterval: NodeJS.Timeout | null = null
+
+  try {
+    const token = localStorage.getItem('token') || ''
+    const response = await fetch('/api/weixin-bridge', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        bot_id: botIdRef.value,
+        api_key: weixinApiKey.value,
+      }),
+    })
+
+    const data = await response.json()
+
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || data.message || 'Failed to start bridge')
+    }
+
+    // Start polling for status
+    let pollCount = 0
+    const maxPolls = 30 // 30 seconds max
+
+    pollInterval = setInterval(async () => {
+      pollCount++
+
+      try {
+        const token = localStorage.getItem('token') || ''
+        const statusResp = await fetch(`${weixinBridgeUrl.value}/info`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+          signal: AbortSignal.timeout(5000),
+        })
+
+        if (statusResp.ok) {
+          const statusData = await statusResp.json()
+          weixinBridgeStatus.value = statusData.info?.status ?? 'unknown'
+
+          // Check if bridge is running
+          if (statusData.info?.status === 'running') {
+            if (pollInterval) {
+              clearInterval(pollInterval)
+              pollInterval = null
+            }
+            isStartingBridge.value = false
+            toast.success(t('bots.channels.weixinBridgeStarted'))
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+
+      // Timeout after max polls
+      if (pollCount >= maxPolls) {
+        if (pollInterval) {
+          clearInterval(pollInterval)
+          pollInterval = null
+        }
+        isStartingBridge.value = false
+        toast.error(t('bots.channels.weixinBridgeStartTimeout'))
+      }
+    }, 1000)
+
+  } catch (err: any) {
+    toast.error(err?.message || t('bots.channels.weixinBridgeStartFailed'))
+    isStartingBridge.value = false
+    if (pollInterval) {
+      clearInterval(pollInterval)
+    }
+  }
+}
+
+// 切换到 weixin 渠道时自动刷新 bridge 状态
+watch(
+  () => props.channelItem.meta.type,
+  (type) => {
+    if (type === 'weixin') refreshWeixinStatus()
+  },
+  { immediate: true },
+)
 
 // Schema fields sorted: required first
 const orderedFields = computed(() => {

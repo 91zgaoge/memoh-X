@@ -87,6 +87,11 @@ type Adapter struct {
 	// Group member cache: chat_id -> GroupInfo (被动收集群聊成员)
 	groupMemberCache   map[string]*GroupInfo
 	groupMemberCacheMu sync.RWMutex
+
+	// In-flight request tracking: prevents double responses when user resends before reply arrives
+	// Key: "botID:conversationKey" (conversationKey = userID for DM, chatID for group)
+	inFlight   map[string]struct{}
+	inFlightMu sync.Mutex
 }
 
 // NewWeComAdapter creates a new WeCom adapter (alias for NewAdapter for compatibility)
@@ -125,6 +130,8 @@ func NewAdapter(logger *slog.Logger) *Adapter {
 		groupCache: make(map[string]string),
 		// 初始化群聊成员缓存（被动收集）
 		groupMemberCache: make(map[string]*GroupInfo),
+		// 初始化在途请求追踪器
+		inFlight: make(map[string]struct{}),
 	}
 }
 
@@ -1162,6 +1169,35 @@ func (a *Adapter) handleMessageCallback(ctx context.Context, cfg channel.Channel
 
 			// Check if should trigger response
 			if shouldTrigger {
+				// In-flight guard: prevent double responses when user resends before reply arrives
+				inFlightKey := cfg.BotID + ":" + conversationID
+				a.inFlightMu.Lock()
+				if _, busy := a.inFlight[inFlightKey]; busy {
+					a.inFlightMu.Unlock()
+					a.logger.Info("conversation already in-flight, rejecting duplicate request",
+						slog.String("in_flight_key", inFlightKey),
+						slog.String("req_id", wsMsg.Headers.ReqID))
+					if wsClient != nil {
+						busyBody := StreamMsgBody{
+							MsgType: MsgTypeStream,
+							Stream: StreamResponse{
+								ID:      generateStreamID(),
+								Finish:  true,
+								Content: "⏳ 上一条消息还在处理中，请稍等片刻...",
+							},
+						}
+						_ = wsClient.SendReply(ctx, wsMsg.Headers.ReqID, busyBody, CmdRespondMsg)
+					}
+					return nil
+				}
+				a.inFlight[inFlightKey] = struct{}{}
+				a.inFlightMu.Unlock()
+				defer func() {
+					a.inFlightMu.Lock()
+					delete(a.inFlight, inFlightKey)
+					a.inFlightMu.Unlock()
+				}()
+
 				// Send immediate "thinking" reply for better UX
 				// CRITICAL: Generate streamID here and pass to both thinking reply and handler
 				streamID := generateStreamID()

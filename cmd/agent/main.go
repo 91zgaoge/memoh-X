@@ -31,6 +31,7 @@ import (
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/telegram"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/wechat"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/wecom"
+	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/adapters/weixin"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/identities"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/inbound"
 	"github.com/Kxiandaoyan/Memoh-v2/internal/channel/route"
@@ -188,6 +189,8 @@ func main() {
 			provideServerHandler(provideWebHandler),
 			provideServerHandler(provideAgentCallHandler),
 			provideServerHandler(provideWeChatWebhookHandler),
+			provideServerHandler(provideWeixinWebhookHandler),
+			provideServerHandler(handlers.NewWeixinBridgeManagerFunc),
 			provideServerHandler(provideTeamsHandler),
 			provideServerHandler(provideUnifiedToolsHandler),
 
@@ -492,6 +495,7 @@ func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, msgService *m
 	registry.MustRegister(local.NewCLIAdapter(hub))
 	registry.MustRegister(local.NewWebAdapter(hub))
 	registry.MustRegister(wechat.NewWeChatAdapter(log))
+	registry.MustRegister(weixin.NewWeixinAdapter(log))
 
 	// WeCom adapter with message/route services for per-route history clearing on "new chat" command.
 	wecomAdapter := wecom.NewWeComAdapter(log)
@@ -676,6 +680,10 @@ func provideAgentCallHandler(log *slog.Logger, botService *bots.Service, resolve
 
 func provideWeChatWebhookHandler(processor *inbound.ChannelInboundProcessor, channelService *channel.Service, preauthService *preauth.Service, queries *dbsqlc.Queries) *handlers.WeChatWebhookHandler {
 	return handlers.NewWeChatWebhookHandler(processor, channelService, preauthService, queries)
+}
+
+func provideWeixinWebhookHandler(processor *inbound.ChannelInboundProcessor, channelService *channel.Service, preauthService *preauth.Service, queries *dbsqlc.Queries) *handlers.WeixinWebhookHandler {
+	return handlers.NewWeixinWebhookHandler(processor, channelService, preauthService, queries)
 }
 
 func provideBuiltinToolConfigService(pool *pgxpool.Pool, log *slog.Logger) *mcp.BuiltinToolConfigService {

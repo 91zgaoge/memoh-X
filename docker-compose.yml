@@ -126,6 +126,7 @@ services:
       - server_cni_state:/var/lib/cni
       - memoh_data:/opt/memoh/data
       - /data2/zimage-ncnn:/zimage:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
@@ -186,6 +187,26 @@ services:
     networks:
       - memoh-network
 
+  weixin-bridge:
+    build:
+      context: ./weixin-bridge
+      dockerfile: Dockerfile
+    container_name: memoh-weixin-bridge
+    restart: unless-stopped
+    environment:
+      - MEMOH_SERVER_URL=http://memoh-server:8080
+      - MEMOH_BOT_ID=${WEIXIN_BOT_ID:-}
+      - MEMOH_API_KEY=${WEIXIN_API_KEY:-}
+      - TOKEN_PATH=/data/.weixin-bot/credentials.json
+    volumes:
+      - weixin_data:/data/.weixin-bot
+    ports:
+      - "3000:3000"
+    networks:
+      - memoh-network
+    depends_on:
+      - server
+
 volumes:
   postgres_data:
     driver: local
@@ -198,6 +219,8 @@ volumes:
   memoh_data:
     driver: local
   server_cni_state:
+    driver: local
+  weixin_data:
     driver: local
 
 networks:

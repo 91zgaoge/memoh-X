@@ -1,5 +1,27 @@
 # Memoh-v2 更新日志
 
+## [2026-03-24] 微信个人 Bridge 功能修复
+
+### 问题
+前端页面 BOT 连接微信（个人）渠道时：
+1. 点击启动 bridge 按钮弹出 "not found" 错误
+2. 桥接服务状态检测一直显示"未知"
+
+### 根本原因
+1. **Nginx 路径匹配**: `location /api/weixin-bridge/` 带尾部斜杠，导致 POST `/api/weixin-bridge` 被 301 重定向，方法变为 GET
+2. **前端调用错误端点**: `refreshWeixinStatus` 调用 `/status`（代理到容器），容器未运行时会失败
+
+### 修复
+- `docker/config/nginx.conf`: 移除 location 尾部斜杠，改为 `location /api/weixin-bridge`
+- `packages/web/src/pages/bots/components/channel-settings-panel.vue`: 改为调用 `/info` 端点（后端直接查询 Docker）
+- `internal/handlers/weixin_bridge_provider.go`: 新增 fx provider 函数
+- `cmd/agent/main.go`: 注册 `NewWeixinBridgeManagerFunc`
+- `internal/server/server.go`: JWT 中间件放行 bridge 代理端点
+
+**详细文档**: `docs/fix-weixin-bridge-routing-2026-03-24.md`
+
+---
+
 ## [2026-03-21] WeCom 群聊文件发送修复
 
 ### 问题

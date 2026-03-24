@@ -58,6 +58,13 @@ func NewServer(log *slog.Logger, addr string, jwtSecret string,
 		if strings.HasPrefix(path, "/channels/") && strings.Contains(path, "/webhook/") {
 			return true
 		}
+		// Weixin bridge proxy endpoints (status/qrcode/health) - bridge has its own simple auth
+		if strings.HasPrefix(path, "/api/weixin-bridge/") && (strings.HasSuffix(path, "/status") ||
+			strings.HasSuffix(path, "/qrcode") ||
+			strings.HasSuffix(path, "/health") ||
+			strings.HasSuffix(path, "/qrcode.txt")) {
+			return true
+		}
 		return false
 	}))
 
