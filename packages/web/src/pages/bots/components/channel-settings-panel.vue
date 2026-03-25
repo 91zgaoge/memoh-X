@@ -668,6 +668,9 @@ const weixinBridgeStatusLabel = computed(() => {
     connecting: t('bots.channels.weixinBridgeStatusConnecting'),
     disconnected: t('bots.channels.weixinBridgeStatusDisconnected'),
     pending: t('bots.channels.weixinBridgeStatusPending'),
+    // 后端返回的状态值映射
+    running: t('bots.channels.weixinBridgeStatusConnected'),
+    stopped: t('bots.channels.weixinBridgeStatusDisconnected'),
   }
   return map[weixinBridgeStatus.value] ?? t('bots.channels.weixinBridgeStatusUnknown')
 })
@@ -675,10 +678,13 @@ const weixinBridgeStatusLabel = computed(() => {
 const weixinBridgeStatusClass = computed(() => {
   switch (weixinBridgeStatus.value) {
     case 'connected':
+    case 'running':
       return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
     case 'connecting':
+    case 'pending':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
     case 'disconnected':
+    case 'stopped':
       return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
     default:
       return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
@@ -697,11 +703,17 @@ async function refreshWeixinStatus() {
     })
     if (resp.ok) {
       const data = await resp.json()
-      // info endpoint returns { success: true, info: { status: 'running' | 'stopped' | ... } }
-      weixinBridgeStatus.value = data.info?.status ?? 'unknown'
+      // 转换后端状态值为前端状态值
+      const backendStatus = data.info?.status ?? 'unknown'
+      const statusMap: Record<string, string> = {
+        'running': 'connected',
+        'stopped': 'disconnected',
+        'pending': 'connecting',
+      }
+      weixinBridgeStatus.value = statusMap[backendStatus] ?? backendStatus
     } else if (resp.status === 404) {
       // Bridge not found means it's not running
-      weixinBridgeStatus.value = 'stopped'
+      weixinBridgeStatus.value = 'disconnected'
     } else {
       weixinBridgeStatus.value = 'unknown'
     }
@@ -848,14 +860,14 @@ async function stopWeixinBridge() {
       // Even if not found in backend memory, we treat it as success
       // since the container might already be gone
       if (response.status === 404) {
-        weixinBridgeStatus.value = 'stopped'
+        weixinBridgeStatus.value = 'disconnected'
         toast.success(t('bots.channels.weixinBridgeStopped'))
         return
       }
       throw new Error(data.error || data.message || 'Failed to stop bridge')
     }
 
-    weixinBridgeStatus.value = 'stopped'
+    weixinBridgeStatus.value = 'disconnected'
     toast.success(t('bots.channels.weixinBridgeStopped'))
   } catch (err: any) {
     toast.error(err?.message || t('bots.channels.weixinBridgeStopFailed'))
@@ -912,10 +924,16 @@ async function startWeixinBridge() {
 
         if (statusResp.ok) {
           const statusData = await statusResp.json()
-          weixinBridgeStatus.value = statusData.info?.status ?? 'unknown'
+          const backendStatus = statusData.info?.status ?? 'unknown'
+          const statusMap: Record<string, string> = {
+            'running': 'connected',
+            'stopped': 'disconnected',
+            'pending': 'connecting',
+          }
+          weixinBridgeStatus.value = statusMap[backendStatus] ?? backendStatus
 
           // Check if bridge is running
-          if (statusData.info?.status === 'running') {
+          if (backendStatus === 'running') {
             if (pollInterval) {
               clearInterval(pollInterval)
               pollInterval = null
