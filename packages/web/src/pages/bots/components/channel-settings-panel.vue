@@ -395,6 +395,99 @@
         {{ $t('bots.channels.save') }}
       </Button>
     </div>
+
+    <!-- WeChat Personal QR Code Dialog -->
+    <Dialog :open="showQRCodeDialog" @update:open="(val: boolean) => { if (!val) closeQRCodeDialog() }">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle class="text-center">🤖 微信扫码登录</DialogTitle>
+          <DialogDescription class="text-center">
+            多人可通过此二维码接入同一个 Bot
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="flex flex-col items-center gap-4 py-4">
+          <!-- Current User Badge -->
+          <div
+            v-if="qrCodeCurrentUser"
+            class="px-4 py-2 rounded-lg text-sm font-medium bg-gradient-to-r from-indigo-500 to-purple-500 text-white flex items-center gap-2"
+          >
+            <span>👤</span>
+            <span>当前登录: {{ qrCodeCurrentUser }}</span>
+          </div>
+
+          <!-- Switch Notice -->
+          <div
+            v-if="qrCodeScanDetected && qrCodeStatus === 'connected'"
+            class="px-4 py-2 rounded-lg text-sm bg-yellow-100 text-yellow-800 text-center"
+          >
+            🔔 检测到新用户扫码，确认后将切换登录用户
+          </div>
+
+          <!-- QR Code Image -->
+          <div class="relative bg-gray-50 p-4 rounded-lg">
+            <img
+              :src="qrCodeImageUrl"
+              alt="微信登录二维码"
+              class="w-64 h-64 object-contain"
+              @load="qrImageLoaded = true"
+              @error="qrImageError = true"
+            />
+            <!-- Loading state -->
+            <div v-if="!qrImageLoaded && !qrImageError" class="absolute inset-0 flex items-center justify-center bg-gray-50">
+              <div class="text-center">
+                <Spinner class="w-8 h-8 mx-auto mb-2" />
+                <p class="text-sm text-gray-500">正在加载二维码...</p>
+              </div>
+            </div>
+            <!-- Error state -->
+            <div v-if="qrImageError" class="absolute inset-0 flex items-center justify-center bg-gray-50">
+              <div class="text-center p-4">
+                <p class="text-sm text-red-500 mb-2">二维码加载失败</p>
+                <Button size="sm" variant="outline" @click="qrImageError = false; qrImageLoaded = false">
+                  重试
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Status Badge -->
+          <div
+            class="px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2"
+            :class="qrCodeStatusClass"
+          >
+            <span class="w-2 h-2 rounded-full bg-current animate-pulse" />
+            {{ qrCodeStatusText }}
+          </div>
+
+          <!-- QR Code URL (collapsible) -->
+          <div v-if="qrCodeUrl" class="w-full">
+            <p class="text-xs text-gray-500 mb-1">如果无法扫码，可复制下方链接到微信打开：</p>
+            <div
+              class="bg-gray-100 p-3 rounded text-xs font-mono break-all cursor-pointer hover:bg-gray-200 transition-colors"
+              @click="copyQRCodeUrl"
+            >
+              {{ qrCodeUrl.substring(0, 80) }}{{ qrCodeUrl.length > 80 ? '...' : '' }}
+            </div>
+          </div>
+
+          <!-- Share hint -->
+          <div class="text-xs text-gray-500 text-center max-w-xs space-y-1">
+            <p>💡 <strong>使用说明：</strong></p>
+            <p>• 二维码长期有效，可多人同时查看</p>
+            <p>• 新用户扫码后，当前登录用户会被切换</p>
+            <p>• 所有用户发送的消息都会交给 Bot 处理</p>
+            <p>• 分享此弹窗链接给他人即可多人使用</p>
+          </div>
+        </div>
+
+        <DialogFooter class="flex gap-2 justify-center">
+          <Button variant="outline" @click="closeQRCodeDialog">
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 
@@ -412,8 +505,14 @@ import {
   SelectValue,
   SelectContent,
   SelectItem,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from '@memoh/ui'
-import { reactive, watch, computed, ref } from 'vue'
+import { reactive, watch, computed, ref, onUnmounted } from 'vue'
 import { toast } from 'vue-sonner'
 import { useI18n } from 'vue-i18n'
 import { useMutation, useQueryCache } from '@pinia/colada'
@@ -552,6 +651,17 @@ const isRefreshingStatus = ref(false)
 const isStartingBridge = ref(false)
 const isStoppingBridge = ref(false)
 
+// QR Code dialog state
+const showQRCodeDialog = ref(false)
+const qrCodeStatus = ref<string>('pending')
+const qrCodeScanDetected = ref(false)
+const qrCodeUrl = ref<string | null>(null)
+const qrCodeCurrentUser = ref<string | null>(null)
+const qrImageLoaded = ref(false)
+const qrImageError = ref(false)
+const qrCodeImageUrl = computed(() => `${weixinBridgeUrl.value}/qrcode-image`)
+let qrCodeEventSource: EventSource | null = null
+
 const weixinBridgeStatusLabel = computed(() => {
   const map: Record<string, string> = {
     connected: t('bots.channels.weixinBridgeStatusConnected'),
@@ -603,7 +713,85 @@ async function refreshWeixinStatus() {
 }
 
 function openWeixinQRCode() {
-  window.open(`${weixinBridgeUrl.value}/qrcode`, '_blank')
+  showQRCodeDialog.value = true
+  qrCodeStatus.value = 'connecting'
+  qrCodeScanDetected.value = false
+  qrImageLoaded.value = false
+  qrImageError.value = false
+  startQRCodeEventSource()
+}
+
+// Start SSE connection for QR code status
+function startQRCodeEventSource() {
+  if (qrCodeEventSource) {
+    qrCodeEventSource.close()
+  }
+
+  const eventSource = new EventSource(`${weixinBridgeUrl.value}/events`)
+  qrCodeEventSource = eventSource
+
+  eventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      qrCodeStatus.value = data.status
+      qrCodeScanDetected.value = data.scanDetected
+      qrCodeUrl.value = data.qrcodeUrl
+      qrCodeCurrentUser.value = data.currentUser || null
+
+      // Note: We don't auto-close the dialog anymore
+      // This allows users to share the QR code with others even after login
+      if (data.status === 'connected' && data.currentUser) {
+        // Just refresh the bridge status in background
+        refreshWeixinStatus()
+      }
+    } catch (err) {
+      console.error('Failed to parse SSE data:', err)
+    }
+  }
+
+  eventSource.onerror = () => {
+    console.log('QR code SSE connection lost')
+  }
+}
+
+function closeQRCodeDialog() {
+  showQRCodeDialog.value = false
+  if (qrCodeEventSource) {
+    qrCodeEventSource.close()
+    qrCodeEventSource = null
+  }
+}
+
+// QR code status text
+const qrCodeStatusText = computed(() => {
+  if (qrCodeScanDetected.value) return '📱 已检测到扫码，请在手机上确认登录'
+  switch (qrCodeStatus.value) {
+    case 'pending': return '⏳ 准备中...'
+    case 'connecting': return '📷 请使用微信扫描二维码'
+    case 'connected': return qrCodeCurrentUser.value ? `✅ ${qrCodeCurrentUser.value} 已登录` : '✅ 登录成功！'
+    case 'disconnected': return '❌ 连接断开'
+    default: return '⏳ 等待中...'
+  }
+})
+
+const qrCodeStatusClass = computed(() => {
+  switch (qrCodeStatus.value) {
+    case 'connected': return 'bg-green-100 text-green-700'
+    case 'connecting': return 'bg-blue-100 text-blue-700'
+    case 'disconnected': return 'bg-red-100 text-red-700'
+    default: return 'bg-yellow-100 text-yellow-700'
+  }
+})
+
+// Copy QR code URL to clipboard
+async function copyQRCodeUrl() {
+  if (!qrCodeUrl.value) return
+  try {
+    await navigator.clipboard.writeText(qrCodeUrl.value)
+    toast.success('链接已复制到剪贴板')
+  } catch {
+    toast.error('复制失败，请手动复制')
+  }
 }
 
 async function generateWeixinApiKey() {
@@ -768,6 +956,13 @@ watch(
   },
   { immediate: true },
 )
+
+// Cleanup SSE on unmounted
+onUnmounted(() => {
+  if (qrCodeEventSource) {
+    qrCodeEventSource.close()
+  }
+})
 
 // Schema fields sorted: required first
 const orderedFields = computed(() => {

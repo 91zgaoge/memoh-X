@@ -62,7 +62,9 @@ func NewServer(log *slog.Logger, addr string, jwtSecret string,
 		if strings.HasPrefix(path, "/api/weixin-bridge/") && (strings.HasSuffix(path, "/status") ||
 			strings.HasSuffix(path, "/qrcode") ||
 			strings.HasSuffix(path, "/health") ||
-			strings.HasSuffix(path, "/qrcode.txt")) {
+			strings.HasSuffix(path, "/qrcode.txt") ||
+			strings.HasSuffix(path, "/qrcode-image") ||
+			strings.HasSuffix(path, "/events")) {
 			return true
 		}
 		return false

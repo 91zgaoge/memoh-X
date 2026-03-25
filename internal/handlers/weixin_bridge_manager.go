@@ -76,6 +76,8 @@ func (h *WeixinBridgeManager) Register(e *echo.Echo) {
 	group.GET("/:bot_id/qrcode", h.ProxyToBridge)
 	group.GET("/:bot_id/health", h.ProxyToBridge)
 	group.GET("/:bot_id/qrcode.txt", h.ProxyToBridge)
+	group.GET("/:bot_id/qrcode-image", h.ProxyToBridge)
+	group.GET("/:bot_id/events", h.ProxyToBridge)
 }
 
 // StartBridgeRequest represents the request to start a bridge container

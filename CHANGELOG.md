@@ -1,6 +1,129 @@
 # Memoh-v2 更新日志
 
-## [2026-03-24] 微信个人 Bridge 功能修复
+## [2026-03-25] 微信个人号扫码登录功能完善
+
+### 新增功能
+
+#### 微信个人号扫码登录支持 (Weixin Personal Account Bridge)
+- **多用户扫码支持**: 二维码长期有效，可多人同时查看
+- **实时状态更新**: 使用 SSE (Server-Sent Events) 实时推送登录状态
+- **用户切换提示**: 新用户扫码时显示切换登录提示
+- **二维码图片生成**: 支持直接生成 QR 码图片或重定向到外部服务
+- **登录历史记录**: 记录最近登录的用户列表
+
+#### 新增端点
+- `GET /api/weixin-bridge/:bot_id/qrcode-image` - 获取二维码图片
+- `GET /api/weixin-bridge/:bot_id/events` - SSE 实时状态流
+
+#### Docker 构建优化
+- 新增 `Dockerfile.tsx` - 使用 tsx 直接运行 TypeScript，避免构建步骤
+- 新增 `Dockerfile.prebuilt` - 使用预构建的 dist 目录
+- 解决 Docker 网络超时问题
+
+### 修复
+
+#### 后端修复
+- **JWT 白名单**: 添加 `/qrcode-image` 和 `/events` 到 JWT 绕过列表，允许公开访问
+- **路由注册**: 在 `WeixinBridgeManager` 中注册新的代理端点
+
+#### 微信桥接修复
+- **二维码捕获**: 修复 SDK 输出拦截，支持多种二维码 URL 格式
+- **无限递归**: 修复 `console.log` 在拦截器中的无限递归问题
+- **多格式匹配**: 支持 `ilink`、`weixin.qq.com`、`liteapp.weixin.qq.com` 等格式
+- **状态持久化**: 登录成功后不清除二维码，支持多用户轮询登录
+
+#### API Key 修复
+- **Preauth Key 格式**: 统一使用 8 位短 token 格式，避免与 64 位哈希混淆
+
+### 改进
+
+#### 前端改进
+- **扫码弹窗**: 全新的二维码弹窗 UI，包含：
+  - 实时二维码图片显示
+  - 当前登录用户展示
+  - 扫码状态实时更新（等待扫码 → 已扫码 → 登录成功）
+  - 二维码链接复制功能
+  - 多用户使用说明
+- **移除自动关闭**: 登录成功后不再自动关闭弹窗，方便分享给他人
+
+#### 状态管理改进
+- 新增 `currentUser` 字段记录当前登录用户
+- 新增 `loginHistory` 数组记录登录历史
+- 新增 `scanDetected` 和 `confirmationPending` 状态标记
+
+### 技术细节
+
+#### SSE 实现
+```typescript
+// 服务端
+app.get('/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+  // 实时推送状态更新
+});
+
+// 客户端
+const evtSource = new EventSource('/events');
+evtSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  // 更新 UI
+};
+```
+
+#### QR 码生成
+- 优先使用 `qrcode` npm 包生成 PNG 图片
+- 降级方案：重定向到 `api.qrserver.com` 外部服务
+
+### 文件变更
+
+```
+internal/handlers/weixin_bridge_manager.go    (+2 路由端点)
+internal/server/server.go                     (+2 JWT 白名单)
+packages/web/src/pages/bots/components/channel-settings-panel.vue    (+二维码弹窗)
+weixin-bridge/src/index.ts                    (+SSE, QR生成, 多用户支持)
+weixin-bridge/Dockerfile.tsx                  (新增)
+weixin-bridge/Dockerfile.prebuilt             (新增)
+weixin-bridge/Dockerfile.local                (新增)
+```
+
+### 部署说明
+
+1. **构建微信桥接镜像**:
+   ```bash
+   cd weixin-bridge
+   docker build -f Dockerfile.tsx -t memoh-weixin-bridge:latest .
+   ```
+
+2. **安装依赖** (如需本地 QR 码生成):
+   ```bash
+   cd weixin-bridge
+   npm install qrcode
+   ```
+
+3. **前端构建**:
+   ```bash
+   cd packages/web
+   pnpm build
+   ```
+
+4. **重启服务**:
+   ```bash
+   docker compose restart server
+   ```
+
+### 使用说明
+
+1. 在 Bot 设置中启用微信个人号渠道
+2. 生成 API Key
+3. 启动桥接容器
+4. 点击"扫码登录"按钮
+5. 使用微信扫描二维码
+6. 可将二维码页面分享给他人，支持多人轮询登录
+
+---
 
 ### 问题
 前端页面 BOT 连接微信（个人）渠道时：
