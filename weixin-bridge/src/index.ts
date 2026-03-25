@@ -34,6 +34,7 @@ const MEMOH_BOT_ID = process.env.MEMOH_BOT_ID || '';
 const MEMOH_API_KEY = process.env.MEMOH_API_KEY || '';
 const BRIDGE_PORT = parseInt(process.env.BRIDGE_PORT || '3000');
 const TOKEN_PATH = process.env.TOKEN_PATH || '/data/.weixin-bot/credentials.json';
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || ''; // External access URL, e.g., https://wework.jxtvnet.com/api/weixin-bridge/{bot_id}
 
 // Bridge state
 const state: BridgeState = {
@@ -57,9 +58,12 @@ app.use(express.json());
 
 // Helper: broadcast state to all SSE clients
 function broadcastState() {
+  // Use public base URL for qrcodeUrl if available
+  const publicQrUrl = PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/qrcode-image` : state.qrcodeUrl;
+
   const data = JSON.stringify({
     status: state.status,
-    qrcodeUrl: state.qrcodeUrl,
+    qrcodeUrl: publicQrUrl,
     scanDetected: state.scanDetected,
     confirmationPending: state.confirmationPending,
     loggedInAt: state.loggedInAt?.toISOString() || null,
@@ -135,10 +139,11 @@ app.get('/events', (req: Request, res: Response) => {
     'Connection': 'keep-alive',
   });
 
-  // Send initial state
+  // Send initial state - use public base URL for qrcodeUrl if available
+  const publicQrUrl = PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/qrcode-image` : state.qrcodeUrl;
   const initialData = JSON.stringify({
     status: state.status,
-    qrcodeUrl: state.qrcodeUrl,
+    qrcodeUrl: publicQrUrl,
     scanDetected: state.scanDetected,
     confirmationPending: state.confirmationPending,
     loggedInAt: state.loggedInAt?.toISOString() || null,
@@ -362,7 +367,7 @@ app.get('/qrcode', (req: Request, res: Response) => {
 
     <div class="qr-container">
       ${state.qrcodeUrl || state.status === 'connected'
-        ? '<img src="/qrcode-image" alt="微信登录二维码" class="qr-image" id="qrImage">'
+        ? '<img src="' + (PUBLIC_BASE_URL || '') + '/qrcode-image" alt="微信登录二维码" class="qr-image" id="qrImage">'
         : '<div class="qr-placeholder">等待二维码生成...</div>'
       }
     </div>
@@ -372,9 +377,9 @@ app.get('/qrcode', (req: Request, res: Response) => {
       <span id="statusText">${getStatusText()}</span>
     </div>
 
-    ${state.qrcodeUrl ? `
+    ${(state.qrcodeUrl || state.status === 'connected') ? `
     <div class="qrcode-url" onclick="copyUrl()" title="点击复制">
-      ${state.qrcodeUrl.substring(0, 60)}${state.qrcodeUrl.length > 60 ? '...' : ''}
+      ${(PUBLIC_BASE_URL || '') + '/qrcode-image'}
     </div>
     <div class="copy-hint">↑ 点击复制链接分享给其他人扫码</div>
     ` : ''}
@@ -442,10 +447,11 @@ app.get('/qrcode', (req: Request, res: Response) => {
     }
 
     // Auto-refresh QR image every 5 seconds
+    const publicBaseUrl = '${PUBLIC_BASE_URL || ''}';
     setInterval(() => {
       const img = document.getElementById('qrImage');
       if (img) {
-        img.src = '/qrcode-image?t=' + Date.now();
+        img.src = publicBaseUrl + '/qrcode-image?t=' + Date.now();
       }
     }, 5000);
 
@@ -540,17 +546,61 @@ app.get('/qrcode.txt', (_req: Request, res: Response) => {
 
 // Status endpoint
 app.get('/status', (_req: Request, res: Response) => {
+  // Use public base URL for qrcodeUrl if available
+  const publicQrUrl = PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/qrcode-image` : state.qrcodeUrl;
+
   res.json({
     status: state.status,
     loggedInAt: state.loggedInAt?.toISOString() || null,
     lastError: state.lastError,
     botId: MEMOH_BOT_ID || null,
-    qrcodeUrl: state.qrcodeUrl,
+    qrcodeUrl: publicQrUrl,
     scanDetected: state.scanDetected,
     confirmationPending: state.confirmationPending,
     currentUser: state.currentUser,
     loginHistory: state.loginHistory,
   });
+});
+
+// Logout endpoint - allows new users to scan QR code
+app.post('/logout', async (_req: Request, res: Response) => {
+  try {
+    // Clear credentials file to force re-login
+    const fs = await import('fs/promises');
+    try {
+      await fs.access(TOKEN_PATH);
+      await fs.unlink(TOKEN_PATH);
+      console.log('[Bridge] Credentials cleared, forcing re-login');
+    } catch {
+      // File doesn't exist, that's fine
+    }
+
+    // Reset state
+    state.status = 'connecting';
+    state.qrcodeUrl = null;
+    state.qrcodeData = null;
+    state.currentUser = null;
+    state.scanDetected = false;
+    state.confirmationPending = false;
+    state.loggedInAt = null;
+
+    res.json({
+      success: true,
+      message: '已退出登录，请刷新页面获取新的二维码',
+    });
+
+    // Exit process to force container restart (Docker will restart it)
+    setTimeout(() => {
+      console.log('[Bridge] Exiting to force restart...');
+      process.exit(0);
+    }, 1000);
+  } catch (error) {
+    console.error('[Bridge] Logout error:', error);
+    res.status(500).json({
+      success: false,
+      error: '退出登录失败: ' + (error instanceof Error ? error.message : String(error)),
+    });
+  }
 });
 
 // Validate configuration
@@ -672,12 +722,16 @@ function setupQrCapture(): () => string | null {
     }
 
     // Capture QR code URL pattern - support multiple formats
-    // Format 1: Standard http(s) URLs
+    // Format 1: Standard http(s) URLs (exclude localhost/local addresses)
     const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
     if (urlMatch) {
       const url = urlMatch[1];
+      // Skip local/localhost URLs
+      if (url.includes('localhost') || url.includes('127.0.0.1') || url.includes('192.168.') || url.includes('10.0.')) {
+        // Ignore local URLs (they are from our own debug output)
+      }
       // Check if it looks like a WeChat login URL
-      if (url.includes('ilink') ||
+      else if (url.includes('ilink') ||
           url.includes('weixin.qq.com') ||
           url.includes('liteapp.weixin.qq.com') ||
           url.includes('login') ||
