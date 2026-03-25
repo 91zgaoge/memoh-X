@@ -456,6 +456,7 @@ func (h *WeixinBridgeManager) createAndStartContainer(info *BridgeInfo, apiKey s
 			fmt.Sprintf("MEMOH_API_KEY=%s", apiKey),
 			"MEMOH_SERVER_URL=http://memoh-server:8080",
 			"TOKEN_PATH=/data/.weixin-bot/credentials.json",
+			fmt.Sprintf("PUBLIC_BASE_URL=https://wework.jxtvnet.com/api/weixin-bridge/%s", info.BotID),
 		},
 		"ExposedPorts": map[string]any{
 			"3000/tcp": map[string]any{},

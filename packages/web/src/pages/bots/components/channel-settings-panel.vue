@@ -191,9 +191,9 @@
         </Button>
       </div>
 
-      <!-- Start Bridge button (shown only when bridge is stopped) -->
+      <!-- Start Bridge button (shown when bridge is stopped/disconnected/unknown) -->
       <div
-        v-if="weixinBridgeStatus === 'stopped'"
+        v-if="weixinBridgeStatus === 'stopped' || weixinBridgeStatus === 'disconnected' || weixinBridgeStatus === 'unknown'"
         class="space-y-1"
       >
         <Button
@@ -209,7 +209,7 @@
         </Button>
       </div>
 
-      <!-- Stop Bridge button (shown when bridge is not stopped - including unknown, running, etc.) -->
+      <!-- Stop Bridge button (shown when bridge is running/connecting/pending) -->
       <div
         v-else
         class="space-y-1"
