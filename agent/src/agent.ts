@@ -1152,6 +1152,25 @@ export const createAgent = (
       console.log('[Agent stream] Recovery: attempting to write hallucinated paths from text content:', hallucinatedPaths.map(a => a.path))
       for (const att of hallucinatedPaths) {
         try {
+          // Check if file already exists to avoid overwriting files created by exec/internal tools
+          const checkBody = JSON.stringify({
+            jsonrpc: '2.0',
+            id: `recovery-check-${att.path}`,
+            method: 'tools/call',
+            params: { name: 'read', arguments: { path: att.path } },
+          })
+          const checkResp = await fetch(mcpToolsURL, { method: 'POST', headers: mcpHeaders(), body: checkBody })
+          if (checkResp.ok) {
+            const checkResult = await checkResp.json().catch(() => ({}))
+            // If file exists (read succeeded without error), skip recovery write
+            // This prevents overwriting files created by exec tool or other internal mechanisms
+            if (!checkResult?.result?.isError) {
+              console.log('[Agent stream] Recovery: file already exists, skipping:', att.path)
+              writtenFiles.push(att.path)  // Mark as written so it gets included in attachments
+              continue
+            }
+          }
+
           const body = JSON.stringify({
             jsonrpc: '2.0',
             id: `recovery-write-${att.path}`,
