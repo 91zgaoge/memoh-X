@@ -1,6 +1,6 @@
 # AI Bot SDK 代码合规性检查报告
 
-**检查日期**: 2026-06-15 03:05:58
+**检查日期**: 2026-06-15 03:32:16
 **检查目录**: /data2/memoh-v2/internal/channel/adapters/wecom
 
 ## 1. 类型定义检查
